@@ -165,3 +165,279 @@ Every Bluetooth device has a **48-bit Bluetooth Device Address (BD_ADDR)**. To i
 | Random Static | ✘ | Rarely | ✘ | Medium |
 | Random Private Resolvable (RPA) | ✘ | ✔ | ✔ (Trusted Devices Only) | High |
 | Random Private Non-Resolvable (NRPA) | ✘ | ✔ | ✘ | Very High |
+
+## wEEK - 2
+Here's a clean, professional **GitHub README** section for these topics.
+
+---
+
+# Advertising Data (AD) Structure
+
+BLE advertisement packets consist of one or more **Advertising Data (AD) Structures**. Each AD structure contains a specific type of information about the device.
+
+Each AD structure follows the format:
+
+```text
++--------+------+-------------+
+| Length | Type |    Data     |
++--------+------+-------------+
+```
+
+* **Length** – Number of bytes in the AD structure (excluding the Length byte itself).
+* **Type** – Identifies the type of information being advertised.
+* **Data** – The actual information associated with the AD Type.
+
+A single advertisement packet can contain **multiple AD structures**, each describing different information such as the device name, supported services, manufacturer data, and more.
+
+---
+
+## Common AD Types
+
+### 0x01 – Flags
+
+Indicates the BLE capabilities and discoverability of the device.
+
+Common Flags:
+
+* LE Limited Discoverable Mode
+* LE General Discoverable Mode
+* BR/EDR Not Supported (BLE Only)
+
+Example:
+
+```text
+02 01 06
+```
+
+---
+
+### 0x09 – Complete Local Name
+
+Contains the complete device name that is displayed during scanning.
+
+Example:
+
+```text
+MAX
+Galaxy Watch
+ESP32
+```
+
+---
+
+### 0x08 – Shortened Local Name
+
+Contains a shortened version of the device name when there is insufficient space for the complete name.
+
+---
+
+### 0x03 – Complete List of 16-bit Service UUIDs
+
+Advertises all supported standard 16-bit BLE services.
+
+Example:
+
+```text
+180D → Heart Rate Service
+180F → Battery Service
+```
+
+---
+
+### 0x16 – Service Data
+
+Contains service-specific data.
+
+Structure:
+
+```text
+Service UUID + Service Value
+```
+
+Used by:
+
+* Eddystone Beacons
+* IoT Devices
+* Custom BLE Services
+
+---
+
+### 0xFF – Manufacturer Specific Data
+
+Contains manufacturer-defined information.
+
+Structure:
+
+```text
+Company ID + Manufacturer Data
+```
+
+Used by:
+
+* Apple iBeacon
+* Xiaomi Mi Band
+* Samsung Devices
+* Fitbit
+* Other proprietary BLE devices
+
+---
+
+# BLE Beacon Formats
+
+BLE beacons periodically broadcast information without requiring a connection.
+
+---
+
+## iBeacon (Apple)
+
+Uses **Manufacturer Specific Data (AD Type 0xFF)**.
+
+Structure:
+
+* Apple Company ID
+* UUID
+* Major
+* Minor
+* TX Power
+
+### Fields
+
+* **UUID** – Identifies a group or organization.
+* **Major** – Identifies a subgroup (e.g., building or floor).
+* **Minor** – Identifies an individual beacon.
+* **TX Power** – Reference transmit power used for distance estimation.
+
+Applications:
+
+* Indoor navigation
+* Asset tracking
+* Proximity marketing
+
+---
+
+## Eddystone (Google)
+
+Uses **Service Data (AD Type 0x16)**.
+
+Supports multiple frame types:
+
+* **UID** – Unique beacon identifier.
+* **URL** – Broadcasts a website URL.
+* **TLM** – Telemetry data (battery voltage, temperature, uptime).
+* **EID** – Ephemeral identifier for enhanced security.
+
+Applications:
+
+* Smart cities
+* IoT deployments
+* Physical web
+* Asset tracking
+
+---
+
+## AltBeacon
+
+An open-source beacon format designed as an alternative to iBeacon.
+
+Uses **Manufacturer Specific Data (0xFF)** and contains:
+
+* Beacon Identifier
+* Manufacturer Data
+* TX Power
+
+Applications:
+
+* Cross-platform beacon deployments
+* Custom BLE beacon solutions
+
+---
+
+## Beacon Format Comparison
+
+| Feature       | iBeacon            | Eddystone          | AltBeacon       |
+| ------------- | ------------------ | ------------------ | --------------- |
+| Developer     | Apple              | Google             | Radius Networks |
+| AD Type       | 0xFF               | 0x16               | 0xFF            |
+| Identifier    | UUID, Major, Minor | UID, URL, TLM, EID | Beacon ID       |
+| Open Standard | No                 | Yes                | Yes             |
+
+---
+
+# Active vs Passive Scanning
+
+BLE devices can be discovered using two different scanning methods.
+
+---
+
+## Passive Scanning
+
+In passive scanning, the scanner **only listens** to advertisement packets.
+
+### Features
+
+* Does not transmit any packets.
+* Receives only advertisement packets.
+* Lower power consumption.
+* Cannot receive Scan Response packets.
+* Suitable for monitoring nearby BLE devices without interacting with them.
+
+Communication:
+
+```text
+Advertiser
+     │
+Advertisement Packet
+     │
+     ▼
+Scanner
+```
+
+---
+
+## Active Scanning
+
+In active scanning, the scanner listens for advertisement packets and then sends a **Scan Request** to obtain additional information.
+
+### Features
+
+* Receives advertisement packets.
+* Sends a Scan Request.
+* Receives a Scan Response if supported by the advertiser.
+* Provides more detailed device information.
+* Slightly higher power consumption.
+* Reveals the presence of the scanner because it transmits Scan Requests.
+
+Communication:
+
+```text
+Advertiser
+      │
+Advertisement Packet
+      │
+      ▼
+Scanner
+      │
+Scan Request
+      │
+      ▼
+Advertiser
+      │
+Scan Response
+      │
+      ▼
+Scanner
+```
+
+---
+
+## Passive vs Active Scanning Comparison
+
+| Feature                                  | Passive Scan | Active Scan |
+| ---------------------------------------- | ------------ | ----------- |
+| Listens to Advertisement Packets         | ✔            | ✔           |
+| Sends Scan Request                       | ✘            | ✔           |
+| Receives Scan Response                   | ✘            | ✔           |
+| Can Obtain Additional Device Information | ✘            | ✔           |
+| Reveals Scanner Presence                 | ✘            | ✔           |
+| Power Consumption                        | Lower        | Higher      |
+
