@@ -1,0 +1,87 @@
+# WEEK 1 
+1. Set up ESP-IDF or Arduino IDE with BLE library support (NimBLE is recommended over the default
+Bluedroid for sniffer work).
+2. Write code to initialize the BLE controller in passive scan mode (no active requests, just listen).
+3. Set scan parameters:
+Scan window: 30ms
+Scan interval: 50ms
+Passive mode: true
+4. In the callback, print for each advertisement:
+MAC address (raw, before resolution)
+RSSI (signal strength)
+Advertising data (raw hex)
+Device name (if present in the data)
+
+
+#include <NimBLEDevice.h>
+class ScanCallbacks : public NimBLEScanCallbacks {
+    void onResult(const NimBLEAdvertisedDevice* device) override {
+        Serial.println("================================");
+        // MAC Address
+        Serial.print("MAC Address : ");
+        Serial.println(device->getAddress().toString().c_str());
+        // RSSI
+        Serial.print("RSSI : ");
+        Serial.print(device->getRSSI());
+        Serial.println(" dBm");
+
+        // Device Name
+        if (device->haveName()) {
+            Serial.print("Device Name : ");
+            Serial.println(device->getName().c_str());
+        } else {
+            Serial.println("Device Name : Not Available");
+        }
+
+        // Raw Advertising Payload
+        Serial.print("Payload : ");
+
+        auto payload = device->getPayload();
+
+        for (size_t i = 0; i < payload.size(); i++) {
+
+            uint8_t b = payload[i];
+
+            if (b < 0x10) {
+                Serial.print("0");
+            }
+
+            Serial.print(b, HEX);
+            Serial.print(" ");
+        }
+
+        Serial.println();
+        Serial.println("================================");
+        Serial.println();
+    }
+};
+
+void setup() {
+
+    Serial.begin(115200);
+    delay(2000);
+
+    Serial.println("Starting BLE Scan");
+
+    NimBLEDevice::init("");
+
+    NimBLEScan* pScan = NimBLEDevice::getScan();
+
+    pScan->setScanCallbacks(new ScanCallbacks(), false);
+
+    // Passive Scan
+    pScan->setActiveScan(false);
+
+    // Scan Interval ≈ 50 ms
+    pScan->setInterval(80);
+
+    // Scan Window ≈ 30 ms
+    pScan->setWindow(48);
+
+    // Continuous Scan
+    pScan->start(0, false, true);
+}
+
+void loop() {
+    delay(1000);
+}
