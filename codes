@@ -86,3 +86,831 @@ void loop() {
     delay(1000);
 }
 
+#WEEK - 2
+1. Write a function to parse the AD structure from raw advertisement bytes.
+2. Detect and decode:
+iBeacon: Extract UUID, Major, Minor, TX Power
+Eddystone-URL: Extract and reconstruct the URL (e.g., 
+https://goo.gl/... )
+Device Name: Extract and print human-readable names
+3. Add a filter to only display devices advertising a specific service UUID (e.g., 
+Service).
+0x180D = Heart Rate
+4. Implement a device tracking table that stores the last seen RSSI and timestamp for each MAC
+address.
+
+**iBeacon**
+#include <Arduino.h>
+#include <NimBLEDevice.h>
+#include <vector>
+
+// --- Real-Time variables ---
+int startHour = 0;
+int startMin = 0;
+int startSec = 0;
+
+// Parses your PC's time during compilation (Format: "HH:MM:SS")
+void parseCompileTime() {
+    const char* compileTime = __TIME__; // e.g. "12:24:37"
+    sscanf(compileTime, "%d:%d:%d", &startHour, &startMin, &startSec);
+}
+
+class MyScanCallbacks : public NimBLEScanCallbacks {
+
+    void parsePayload(const uint8_t *payload, size_t length) {
+        Serial.println("\n----- AD Structures -----");
+        size_t index = 0;
+        int count = 1;
+
+        while (index < length) {
+            uint8_t fieldLength = payload[index];
+            if (fieldLength == 0) break;
+            if (index + fieldLength >= length) break;
+
+            uint8_t type = payload[index + 1];
+
+            Serial.println("-------------------------");
+            Serial.print("Structure : ");
+            Serial.println(count++);
+            Serial.print("Length    : ");
+            Serial.println(fieldLength);
+            Serial.print("Type      : 0x");
+            if (type < 16) Serial.print("0");
+            Serial.println(type, HEX);
+            Serial.print("Meaning   : ");
+
+            switch (type) {
+                case 0x01:
+                    Serial.println("Flags");
+                    break;
+                case 0x08:
+                    Serial.println("Shortened Local Name");
+                    break;
+                case 0x09:
+                    Serial.println("Complete Local Name");
+                    break;
+                case 0x16:
+                    Serial.println("Service Data");
+                    break;
+
+                case 0xFF:
+                    Serial.println("Manufacturer Specific Data");
+                    
+                    // --- PART 1: DECODE iBEACON ---
+                    if (fieldLength - 1 >= 25 && 
+                        payload[index + 2] == 0x4C && payload[index + 3] == 0x00 && 
+                        payload[index + 4] == 0x02 && payload[index + 5] == 0x15) {
+                        
+                        Serial.println("      [DECODED iBEACON]");
+                        
+                        char uuidStr[37];
+                        sprintf(uuidStr, "%02x%02x%02x%02x-%02x%02x-%02x%02x-%02x%02x-%02x%02x%02x%02x%02x%02x",
+                                payload[index + 6], payload[index + 7], payload[index + 8], payload[index + 9],
+                                payload[index + 10], payload[index + 11],
+                                payload[index + 12], payload[index + 13],
+                                payload[index + 14], payload[index + 15],
+                                payload[index + 16], payload[index + 17], 
+                                payload[index + 18], payload[index + 19], 
+                                payload[index + 20], payload[index + 21]);
+                        
+                        uint16_t major = (payload[index + 22] << 8) | payload[index + 23];
+                        uint16_t minor = (payload[index + 24] << 8) | payload[index + 25];
+                        int8_t txPower = (int8_t)payload[index + 26];
+                        
+                        Serial.print("         UUID : ");
+                        Serial.println(uuidStr);
+                        Serial.print("         Major: ");
+                        Serial.println(major);
+                        Serial.print("         Minor: ");
+                        Serial.println(minor);
+                        Serial.print("         TX Pwr: ");
+                        Serial.print(txPower);
+                        Serial.println(" dBm");
+                    }
+                    break;
+
+                default:
+                    Serial.println("Unknown");
+                    break;
+            }
+
+            Serial.print("Data      : ");
+            for (int i = 0; i < fieldLength - 1; i++) {
+                uint8_t value = payload[index + 2 + i];
+                if (type == 0x08 || type == 0x09) {
+                    Serial.print((char)value);
+                } else {
+                    if (value < 16) Serial.print("0");
+                    Serial.print(value, HEX);
+                    Serial.print(" ");
+                }
+            }
+            Serial.println();
+            index += fieldLength + 1;
+        }
+        Serial.println("-------------------------");
+    }
+
+public:
+    void onResult(const NimBLEAdvertisedDevice *device) override {
+        // --- CALCULATE REAL IST TIME ---
+        unsigned long ms = millis();
+        unsigned long elapsedSecs = ms / 1000;
+        unsigned long elapsedMs = ms % 1000;
+
+        unsigned long totalSecs = startSec + elapsedSecs;
+        unsigned long totalMins = startMin + (totalSecs / 60);
+        unsigned long totalHours = startHour + (totalMins / 60);
+
+        int currentSec = totalSecs % 60;
+        int currentMin = totalMins % 60;
+        int currentHour = totalHours % 24;
+
+        char timeBuffer[16];
+        sprintf(timeBuffer, "%02d:%02d:%02d.%03lu", currentHour, currentMin, currentSec, elapsedMs);
+
+        Serial.println("\n========================================");
+        Serial.print("Discovery Time (IST): ");
+        Serial.println(timeBuffer);  // Displays real clock time
+        Serial.print("MAC Address         : ");
+        Serial.println(device->getAddress().toString().c_str());
+        Serial.print("RSSI                : ");
+        Serial.print(device->getRSSI());
+        Serial.println(" dBm");
+
+        if (device->haveName()) {
+            Serial.print("Device Name         : ");
+            Serial.println(device->getName().c_str());
+        } else {
+            Serial.println("Device Name         : Not Available");
+        }
+
+        const std::vector<uint8_t> &payload = device->getPayload();
+        Serial.print("Payload Size        : ");
+        Serial.print(payload.size());
+        Serial.println(" Bytes");
+
+        Serial.print("\nRaw Payload         : ");
+        for (size_t i = 0; i < payload.size(); i++) {
+            if (payload[i] < 16) Serial.print("0");
+            Serial.print(payload[i], HEX);
+            Serial.print(" ");
+        }
+        Serial.println();
+
+        parsePayload(payload.data(), payload.size());
+        Serial.println("========================================");
+    }
+};
+
+NimBLEScan *pScan;
+
+void setup() {
+    Serial.begin(115200);
+    Serial.println("\nStarting BLE Scanner...\n");
+
+    // Initialize the real-time clock structure using the compile time
+    parseCompileTime();
+
+    NimBLEDevice::init("");
+    pScan = NimBLEDevice::getScan();
+    pScan->setScanCallbacks(new MyScanCallbacks(), false);
+    pScan->setActiveScan(false);
+    pScan->setInterval(100);
+    pScan->setWindow(100);
+    
+    pScan->start(0, false); 
+}
+
+void loop() {
+    delay(1000);
+}
+
+**Eddystone UID**
+#include <Arduino.h>
+#include <NimBLEDevice.h>
+#include <vector>
+
+// --- Real-Time clock variables ---
+int startHour = 0, startMin = 0, startSec = 0;
+void parseCompileTime() {
+    sscanf(__TIME__, "%d:%d:%d", &startHour, &startMin, &startSec);
+}
+
+// --- FILTER CONFIGURATION ---
+#define FILTER_BY_SERVICE_UUID  true
+
+class MyScanCallbacks : public NimBLEScanCallbacks {
+
+    void parsePayload(const uint8_t *payload, size_t length) {
+        Serial.println("\n----- AD Structures -----");
+        size_t index = 0;
+        int count = 1;
+
+        while (index < length) {
+            uint8_t fieldLength = payload[index];
+            if (fieldLength == 0) break;
+            if (index + fieldLength >= length) break;
+
+            uint8_t type = payload[index + 1];
+
+            Serial.println("-------------------------");
+            Serial.print("Structure : ");
+            Serial.println(count++);
+            Serial.print("Length    : ");
+            Serial.println(fieldLength);
+            Serial.print("Type      : 0x");
+            if (type < 16) Serial.print("0");
+            Serial.println(type, HEX);
+            Serial.print("Meaning   : ");
+
+            switch (type) {
+                case 0x01:
+                    Serial.println("Flags");
+                    break;
+                case 0x08:
+                    Serial.println("Shortened Local Name");
+                    break;
+                case 0x09:
+                    Serial.println("Complete Local Name");
+                    break;
+
+                case 0x16:
+                    Serial.println("Service Data");
+                    
+                    // --- DECODE EDDYSTONE-UID (Frame Type 0x00) ---
+                    if (fieldLength >= 4 && payload[index + 2] == 0xAA && payload[index + 3] == 0xFE) {
+                        uint8_t frameType = payload[index + 4];
+                        
+                        if (frameType == 0x00) {
+                            Serial.println("      [DECODED EDDYSTONE-UID]");
+                            int8_t txPower = (int8_t)payload[index + 5];
+                            
+                            // Extract 10-byte Namespace ID
+                            char namespaceID[21];
+                            char* pNamespace = namespaceID;
+                            for (int i = 0; i < 10; i++) {
+                                sprintf(pNamespace, "%02X", payload[index + 6 + i]);
+                                pNamespace += 2;
+                            }
+                            
+                            // Extract 6-byte Instance ID
+                            char instanceID[13];
+                            char* pInstance = instanceID;
+                            for (int i = 0; i < 6; i++) {
+                                sprintf(pInstance, "%02X", payload[index + 16 + i]);
+                                pInstance += 2;
+                            }
+                            
+                            Serial.print("         Namespace ID: ");
+                            Serial.println(namespaceID);
+                            Serial.print("         Instance ID : ");
+                            Serial.println(instanceID);
+                            Serial.print("         TX Power    : ");
+                            Serial.print(txPower);
+                            Serial.println(" dBm");
+                        }
+                    }
+                    break;
+
+                default:
+                    Serial.println("Unknown");
+                    break;
+            }
+
+            Serial.print("Data      : ");
+            for (int i = 0; i < fieldLength - 1; i++) {
+                uint8_t value = payload[index + 2 + i];
+                if (type == 0x08 || type == 0x09) {
+                    Serial.print((char)value);
+                } else {
+                    if (value < 16) Serial.print("0");
+                    Serial.print(value, HEX);
+                    Serial.print(" ");
+                }
+            }
+            Serial.println();
+            index += fieldLength + 1;
+        }
+        Serial.println("-------------------------");
+    }
+
+public:
+    void onResult(const NimBLEAdvertisedDevice *device) override {
+        // --- SMART FILTER LOGIC ---
+        if (FILTER_BY_SERVICE_UUID) {
+            bool foundTarget = false;
+            if (device->isAdvertisingService(NimBLEUUID("feaa"))) {
+                foundTarget = true;
+            } else {
+                const std::vector<uint8_t>& payload = device->getPayload();
+                size_t idx = 0;
+                while (idx < payload.size()) {
+                    uint8_t len = payload[idx];
+                    if (len == 0 || idx + len >= payload.size()) break;
+                    uint8_t type = payload[idx + 1];
+                    if (type == 0x16 && len >= 4) { 
+                        if (payload[idx + 2] == 0xAA && payload[idx + 3] == 0xFE) {
+                            foundTarget = true;
+                            break;
+                        }
+                    }
+                    idx += len + 1;
+                }
+            }
+            if (!foundTarget) return; 
+        }
+
+        unsigned long ms = millis();
+        unsigned long elapsedSecs = ms / 1000;
+        unsigned long elapsedMs = ms % 1000;
+
+        unsigned long totalSecs = startSec + elapsedSecs;
+        unsigned long totalMins = startMin + (totalSecs / 60);
+        unsigned long totalHours = startHour + (totalMins / 60);
+
+        int currentSec = totalSecs % 60;
+        int currentMin = totalMins % 60;
+        int currentHour = totalHours % 24;
+
+        char timeBuffer[16];
+        sprintf(timeBuffer, "%02d:%02d:%02d.%03lu", currentHour, currentMin, currentSec, elapsedMs);
+
+        Serial.println("\n========================================");
+        Serial.print("Discovery Time (IST): ");
+        Serial.println(timeBuffer);
+        Serial.print("MAC Address         : ");
+        Serial.println(device->getAddress().toString().c_str());
+        Serial.print("RSSI                : ");
+        Serial.print(device->getRSSI());
+        Serial.println(" dBm");
+
+        if (device->haveName()) {
+            Serial.print("Device Name         : ");
+            Serial.println(device->getName().c_str());
+        } else {
+            Serial.println("Device Name         : Not Available");
+        }
+
+        const std::vector<uint8_t> &payload = device->getPayload();
+        Serial.print("Payload Size        : ");
+        Serial.print(payload.size());
+        Serial.println(" Bytes");
+
+        Serial.print("\nRaw Payload         : ");
+        for (size_t i = 0; i < payload.size(); i++) {
+            if (payload[i] < 16) Serial.print("0");
+            Serial.print(payload[i], HEX);
+            Serial.print(" ");
+        }
+        Serial.println();
+
+        parsePayload(payload.data(), payload.size());
+        Serial.println("========================================");
+    }
+};
+
+NimBLEScan *pScan;
+
+void setup() {
+    Serial.begin(115200);
+    Serial.println("\nStarting BLE Scanner...\n");
+    parseCompileTime();
+    
+    NimBLEDevice::init("");
+    pScan = NimBLEDevice::getScan();
+    pScan->setScanCallbacks(new MyScanCallbacks(), false);
+    pScan->setActiveScan(false);
+    pScan->setInterval(100);
+    pScan->setWindow(100);
+    
+    pScan->start(0, false); 
+}
+
+void loop() {
+    delay(1000);
+}
+
+**Eddystone URL**
+#include <Arduino.h>
+#include <NimBLEDevice.h>
+#include <vector>
+
+// --- Real-Time variables ---
+int startHour = 0;
+int startMin = 0;
+int startSec = 0;
+
+// Parses your PC's time during compilation (Format: "HH:MM:SS")
+void parseCompileTime() {
+    const char* compileTime = __TIME__; // e.g. "12:24:37"
+    sscanf(compileTime, "%d:%d:%d", &startHour, &startMin, &startSec);
+}
+
+// --- PART 2: EDDYSTONE SPEC CONSTANTS ---
+static const char* urlSchemes[] = {
+    "http://www.",
+    "https://www.",
+    "http://",
+    "https://"
+};
+
+static const char* urlExpansions[] = {
+    ".com/", ".org/", ".edu/", ".net/", ".info/", ".biz/", ".gov/",
+    ".com", ".org", ".edu", ".net", ".info", ".biz", ".gov"
+};
+
+class MyScanCallbacks : public NimBLEScanCallbacks {
+
+    void parsePayload(const uint8_t *payload, size_t length) {
+        Serial.println("\n----- AD Structures -----");
+        size_t index = 0;
+        int count = 1;
+
+        while (index < length) {
+            uint8_t fieldLength = payload[index];
+            if (fieldLength == 0) break;
+            if (index + fieldLength >= length) break;
+
+            uint8_t type = payload[index + 1];
+
+            Serial.println("-------------------------");
+            Serial.print("Structure : ");
+            Serial.println(count++);
+            Serial.print("Length    : ");
+            Serial.println(fieldLength);
+            Serial.print("Type      : 0x");
+            if (type < 16) Serial.print("0");
+            Serial.println(type, HEX);
+            Serial.print("Meaning   : ");
+
+            switch (type) {
+                case 0x01:
+                    Serial.println("Flags");
+                    break;
+                case 0x08:
+                    Serial.println("Shortened Local Name");
+                    break;
+                case 0x09:
+                    Serial.println("Complete Local Name");
+                    break;
+
+                case 0x16:
+                    Serial.println("Service Data");
+                    
+                    // --- PART 2: DECODE EDDYSTONE-URL ---
+                    // Eddystone-URL signature has:
+                    // 1. Min length of 6 bytes inside payload data
+                    // 2. Service UUID = 0xFEAA -> little-endian bytes: 0xAA, 0xFE
+                    // 3. Eddystone Frame Type = 0x10 (URL frame)
+                    if (fieldLength >= 6 && 
+                        payload[index + 2] == 0xAA && payload[index + 3] == 0xFE && 
+                        payload[index + 4] == 0x10) {
+                        
+                        Serial.println("      [DECODED EDDYSTONE-URL]");
+                        
+                        uint8_t txPower = payload[index + 5];   // Calibrated Tx Power at 0m
+                        uint8_t schemeCode = payload[index + 6]; // URL Prefix (e.g. 0x01 for https://www.)
+                        
+                        String url = "";
+                        
+                        // Add URL Scheme prefix
+                        if (schemeCode < 4) {
+                            url += urlSchemes[schemeCode];
+                        }
+                        
+                        // Decode URL characters and expansions
+                        for (size_t i = 7; i <= fieldLength; i++) {
+                            uint8_t b = payload[index + i];
+                            if (b <= 0x0D) {
+                                url += urlExpansions[b]; // e.g. 0x07 replaces with ".com"
+                            } else if (b >= 32 && b <= 126) {
+                                url += (char)b;          // Printable ASCII characters
+                            } else {
+                                // Non-printable hex
+                                url += "\\x";
+                                if (b < 16) url += "0";
+                                url += String(b, HEX);
+                            }
+                        }
+                        
+                        Serial.print("         URL  : ");
+                        Serial.println(url);
+                        Serial.print("         TX Pwr: ");
+                        Serial.print((int8_t)txPower);
+                        Serial.println(" dBm");
+                    }
+                    break;
+
+                case 0xFF:
+                    Serial.println("Manufacturer Specific Data");
+                    
+                    // --- PART 1: DECODE iBEACON ---
+                    if (fieldLength - 1 >= 25 && 
+                        payload[index + 2] == 0x4C && payload[index + 3] == 0x00 && 
+                        payload[index + 4] == 0x02 && payload[index + 5] == 0x15) {
+                        
+                        Serial.println("      [DECODED iBEACON]");
+                        
+                        char uuidStr[37];
+                        sprintf(uuidStr, "%02x%02x%02x%02x-%02x%02x-%02x%02x-%02x%02x-%02x%02x%02x%02x%02x%02x",
+                                payload[index + 6], payload[index + 7], payload[index + 8], payload[index + 9],
+                                payload[index + 10], payload[index + 11],
+                                payload[index + 12], payload[index + 13],
+                                payload[index + 14], payload[index + 15],
+                                payload[index + 16], payload[index + 17], 
+                                payload[index + 18], payload[index + 19], 
+                                payload[index + 20], payload[index + 21]);
+                        
+                        uint16_t major = (payload[index + 22] << 8) | payload[index + 23];
+                        uint16_t minor = (payload[index + 24] << 8) | payload[index + 25];
+                        int8_t txPower = (int8_t)payload[index + 26];
+                        
+                        Serial.print("         UUID : ");
+                        Serial.println(uuidStr);
+                        Serial.print("         Major: ");
+                        Serial.println(major);
+                        Serial.print("         Minor: ");
+                        Serial.println(minor);
+                        Serial.print("         TX Pwr: ");
+                        Serial.print(txPower);
+                        Serial.println(" dBm");
+                    }
+                    break;
+
+                default:
+                    Serial.println("Unknown");
+                    break;
+            }
+
+            Serial.print("Data      : ");
+            for (int i = 0; i < fieldLength - 1; i++) {
+                uint8_t value = payload[index + 2 + i];
+                if (type == 0x08 || type == 0x09) {
+                    Serial.print((char)value);
+                } else {
+                    if (value < 16) Serial.print("0");
+                    Serial.print(value, HEX);
+                    Serial.print(" ");
+                }
+            }
+            Serial.println();
+            index += fieldLength + 1;
+        }
+        Serial.println("-------------------------");
+    }
+
+public:
+    void onResult(const NimBLEAdvertisedDevice *device) override {
+        // --- CALCULATE REAL IST TIME ---
+        unsigned long ms = millis();
+        unsigned long elapsedSecs = ms / 1000;
+        unsigned long elapsedMs = ms % 1000;
+
+        unsigned long totalSecs = startSec + elapsedSecs;
+        unsigned long totalMins = startMin + (totalSecs / 60);
+        unsigned long totalHours = startHour + (totalMins / 60);
+
+        int currentSec = totalSecs % 60;
+        int currentMin = totalMins % 60;
+        int currentHour = totalHours % 24;
+
+        char timeBuffer[16];
+        sprintf(timeBuffer, "%02d:%02d:%02d.%03lu", currentHour, currentMin, currentSec, elapsedMs);
+
+        Serial.println("\n========================================");
+        Serial.print("Discovery Time (IST): ");
+        Serial.println(timeBuffer);
+        Serial.print("MAC Address         : ");
+        Serial.println(device->getAddress().toString().c_str());
+        Serial.print("RSSI                : ");
+        Serial.print(device->getRSSI());
+        Serial.println(" dBm");
+
+        if (device->haveName()) {
+            Serial.print("Device Name         : ");
+            Serial.println(device->getName().c_str());
+        } else {
+            Serial.println("Device Name         : Not Available");
+        }
+
+        const std::vector<uint8_t> &payload = device->getPayload();
+        Serial.print("Payload Size        : ");
+        Serial.print(payload.size());
+        Serial.println(" Bytes");
+
+        Serial.print("\nRaw Payload         : ");
+        for (size_t i = 0; i < payload.size(); i++) {
+            if (payload[i] < 16) Serial.print("0");
+            Serial.print(payload[i], HEX);
+            Serial.print(" ");
+        }
+        Serial.println();
+
+        parsePayload(payload.data(), payload.size());
+        Serial.println("========================================");
+    }
+};
+
+NimBLEScan *pScan;
+
+void setup() {
+    Serial.begin(115200);
+    Serial.println("\nStarting BLE Scanner...\n");
+
+    parseCompileTime();
+
+    NimBLEDevice::init("");
+    pScan = NimBLEDevice::getScan();
+    pScan->setScanCallbacks(new MyScanCallbacks(), false);
+    pScan->setActiveScan(false);
+    pScan->setInterval(100);
+    pScan->setWindow(100);
+    
+    pScan->start(0, false); 
+}
+
+void loop() {
+    delay(1000);
+}
+
+**Eddystone TIM
+
+
+
+**AltBeacon**
+#include <Arduino.h>
+#include <NimBLEDevice.h>
+#include <vector>
+
+// --- Real-Time clock variables ---
+int startHour = 0, startMin = 0, startSec = 0;
+void parseCompileTime() {
+    sscanf(__TIME__, "%d:%d:%d", &startHour, &startMin, &startSec);
+}
+
+class MyScanCallbacks : public NimBLEScanCallbacks {
+
+    void parsePayload(const uint8_t *payload, size_t length) {
+        Serial.println("\n----- AD Structures -----");
+        size_t index = 0;
+        int count = 1;
+
+        while (index < length) {
+            uint8_t fieldLength = payload[index];
+            if (fieldLength == 0) break;
+            if (index + fieldLength >= length) break;
+
+            uint8_t type = payload[index + 1];
+
+            Serial.println("-------------------------");
+            Serial.print("Structure : ");
+            Serial.println(count++);
+            Serial.print("Length    : ");
+            Serial.println(fieldLength);
+            Serial.print("Type      : 0x");
+            if (type < 16) Serial.print("0");
+            Serial.println(type, HEX);
+            Serial.print("Meaning   : ");
+
+            switch (type) {
+                case 0x01:
+                    Serial.println("Flags");
+                    break;
+                case 0x08:
+                    Serial.println("Shortened Local Name");
+                    break;
+                case 0x09:
+                    Serial.println("Complete Local Name");
+                    break;
+
+                case 0xFF:
+                    Serial.println("Manufacturer Specific Data");
+                    
+                    // --- DECODE ALTBEACON ---
+                    // AltBeacon has:
+                    // 1. Min length of 26 bytes inside payload data
+                    // 2. AltBeacon signature = 0xBEAC at payload[index + 4..5]
+                    if (fieldLength - 1 >= 26 && 
+                        payload[index + 4] == 0xBE && payload[index + 5] == 0xAC) {
+                        
+                        Serial.println("      [DECODED ALTBEACON]");
+                        
+                        // Extract 2-byte Company ID (little-endian)
+                        uint16_t companyId = (payload[index + 3] << 8) | payload[index + 2];
+                        
+                        // Extract 20-byte Beacon ID (16-byte UUID + 2-byte Major + 2-byte Minor)
+                        char beaconIdStr[41];
+                        char* pId = beaconIdStr;
+                        for (int i = 0; i < 20; i++) {
+                            sprintf(pId, "%02x", payload[index + 6 + i]);
+                            pId += 2;
+                        }
+                        
+                        // Extract Calibrated RSSI (Tx Power at 1m)
+                        int8_t referenceRssi = (int8_t)payload[index + 26];
+                        
+                        // Extract Manufacturer Reserved Byte
+                        uint8_t mfgReserved = payload[index + 27];
+                        
+                        Serial.print("         Company ID  : 0x");
+                        Serial.println(companyId, HEX);
+                        Serial.print("         Beacon ID   : ");
+                        Serial.println(beaconIdStr);
+                        Serial.print("         Ref RSSI    : ");
+                        Serial.print(referenceRssi);
+                        Serial.println(" dBm");
+                        Serial.print("         Mfg Reserved: 0x");
+                        Serial.println(mfgReserved, HEX);
+                    }
+                    break;
+
+                default:
+                    Serial.println("Unknown");
+                    break;
+            }
+
+            Serial.print("Data      : ");
+            for (int i = 0; i < fieldLength - 1; i++) {
+                uint8_t value = payload[index + 2 + i];
+                if (type == 0x08 || type == 0x09) {
+                    Serial.print((char)value);
+                } else {
+                    if (value < 16) Serial.print("0");
+                    Serial.print(value, HEX);
+                    Serial.print(" ");
+                }
+            }
+            Serial.println();
+            index += fieldLength + 1;
+        }
+        Serial.println("-------------------------");
+    }
+
+public:
+    void onResult(const NimBLEAdvertisedDevice *device) override {
+        unsigned long ms = millis();
+        unsigned long elapsedSecs = ms / 1000;
+        unsigned long elapsedMs = ms % 1000;
+
+        unsigned long totalSecs = startSec + elapsedSecs;
+        unsigned long totalMins = startMin + (totalSecs / 60);
+        unsigned long totalHours = startHour + (totalMins / 60);
+
+        char timeBuffer[16];
+        sprintf(timeBuffer, "%02d:%02d:%02d.%03lu", (int)(totalHours % 24), (int)(totalMins % 60), (int)(totalSecs % 60), elapsedMs);
+
+        Serial.println("\n========================================");
+        Serial.print("Discovery Time (IST): ");
+        Serial.println(timeBuffer);
+        Serial.print("MAC Address         : ");
+        Serial.println(device->getAddress().toString().c_str());
+        Serial.print("RSSI                : ");
+        Serial.print(device->getRSSI());
+        Serial.println(" dBm");
+
+        if (device->haveName()) {
+            Serial.print("Device Name         : ");
+            Serial.println(device->getName().c_str());
+        } else {
+            Serial.println("Device Name         : Not Available");
+        }
+
+        const std::vector<uint8_t> &payload = device->getPayload();
+        Serial.print("Payload Size        : ");
+        Serial.print(payload.size());
+        Serial.println(" Bytes");
+
+        Serial.print("\nRaw Payload         : ");
+        for (size_t i = 0; i < payload.size(); i++) {
+            if (payload[i] < 16) Serial.print("0");
+            Serial.print(payload[i], HEX);
+            Serial.print(" ");
+        }
+        Serial.println();
+
+        parsePayload(payload.data(), payload.size());
+        Serial.println("========================================");
+    }
+};
+
+NimBLEScan *pScan;
+
+void setup() {
+    Serial.begin(115200);
+    Serial.println("\nStarting BLE Scanner...\n");
+    parseCompileTime();
+    
+    NimBLEDevice::init("");
+    pScan = NimBLEDevice::getScan();
+    pScan->setScanCallbacks(new MyScanCallbacks(), false);
+    pScan->setActiveScan(false);
+    pScan->setInterval(100);
+    pScan->setWindow(100);
+    
+    pScan->start(0, false); 
+}
+
+void loop() {
+    delay(1000);
+}
