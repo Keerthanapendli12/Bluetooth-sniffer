@@ -3069,3 +3069,1123 @@ void onWebSocketEvent(uint8_t num, WStype_t type, uint8_t * payload, size_t leng
     }
   }
 }
+
+
+
+PART C
+
+/*
+  ====================================================================
+  ESP32 BLE Sniffer & Live Web Dashboard (With Threat Detection - Part C)
+  ====================================================================
+  
+  Required Libraries (Install via Arduino Library Manager):
+  - "WebSockets" by Markus Sattler (v2.4.x or newer)
+  
+  Hardware:
+  - Any standard ESP32, ESP32-S3, or ESP32-C3 board
+*/
+
+#include <WiFi.h>
+#include <WebServer.h>
+#include <WebSocketsServer.h>
+#include <ESPmDNS.h>
+#include <BLEDevice.h>
+#include <BLEUtils.h>
+#include <BLEScan.h>
+#include <BLEAdvertisedDevice.h>
+
+// ==========================================
+// CONFIGURATION (Wi-Fi Access Point Settings)
+// ==========================================
+const char* ap_ssid  = "ESP32_BLE_Sniffer";
+const char* ap_pass  = "sniffer123";
+
+// Web Servers
+WebServer server(80);
+WebSocketsServer webSocket = WebSocketsServer(81);
+
+// BLE Scanner Settings
+BLEScan* pBLEScan;
+bool isScanning = true;
+
+// ==========================================
+// Embedded Web Asset Strings (PROGMEM)
+// ==========================================
+
+const char index_html[] PROGMEM = R"rawliteral(
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>BLE Sniffer - Threat Dashboard</title>
+    <link rel="preconnect" href="https://fonts.googleapis.com">
+    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+    <link href="https://fonts.googleapis.com/css2?family=Outfit:wght@300;400;600;800&family=Space+Mono:wght@400;700&display=swap" rel="stylesheet">
+    <link rel="stylesheet" href="/style.css">
+</head>
+<body>
+    <div class="app-container">
+        <header>
+            <div class="logo-area">
+                <span class="logo-icon">📡</span>
+                <div class="title-meta">
+                    <h1>BLE SHIELD</h1>
+                    <span class="subtitle">Threat Sniffer & Analyzer</span>
+                </div>
+            </div>
+            <div class="control-panel">
+                <div class="search-box">
+                    <input type="text" id="search-input" placeholder="Search MAC or Name...">
+                </div>
+                <div class="filter-box">
+                    <label for="rssi-threshold">RSSI Threshold: <span id="rssi-val">-100</span> dBm</label>
+                    <input type="range" id="rssi-threshold" min="-100" max="-30" value="-100">
+                </div>
+                <button id="scan-toggle" class="btn scanning">Pause Scan</button>
+                <div class="status-indicator">
+                    <span class="status-dot online"></span>
+                    <span id="connection-status">Connected</span>
+                </div>
+            </div>
+        </header>
+
+        <section class="stats-row">
+            <div class="stat-card">
+                <div class="stat-icon">🔍</div>
+                <div class="stat-info">
+                    <span class="stat-label">Devices Discovered</span>
+                    <span id="stat-devices-count" class="stat-value">0</span>
+                </div>
+            </div>
+            <div class="stat-card">
+                <div class="stat-icon">📦</div>
+                <div class="stat-info">
+                    <span class="stat-label">Packets Captured</span>
+                    <span id="stat-packets-count" class="stat-value">0</span>
+                </div>
+            </div>
+            <div class="stat-card">
+                <div class="stat-icon">⚡</div>
+                <div class="stat-info">
+                    <span class="stat-label">Average Packet Rate</span>
+                    <span id="stat-packet-rate" class="stat-value">0 /s</span>
+                </div>
+            </div>
+            <div class="stat-card">
+                <div class="stat-icon">⏱️</div>
+                <div class="stat-info">
+                    <span class="stat-label">Session Uptime</span>
+                    <span id="stat-uptime" class="stat-value">00:00:00</span>
+                </div>
+            </div>
+        </section>
+
+        <main class="dashboard-grid">
+            <section class="panel device-list-panel">
+                <div class="panel-header">
+                    <h2>Live Device Registry</h2>
+                    <span class="panel-meta" id="visible-count">Showing 0 devices</span>
+                </div>
+                <div class="table-container">
+                    <table id="device-table">
+                        <thead>
+                            <tr>
+                                <th>Device Name</th>
+                                <th>MAC Address</th>
+                                <th>RSSI</th>
+                                <th>Device Type</th>
+                                <th>Packets</th>
+                                <th>Last Seen</th>
+                            </tr>
+                        </thead>
+                        <tbody id="device-table-body">
+                            <tr class="empty-row">
+                                <td colspan="6">Waiting for BLE packets... Make sure active scanning is running.</td>
+                            </tr>
+                        </tbody>
+                    </table>
+                </div>
+            </section>
+
+            <section class="panel inspector-panel">
+                <div class="panel-header border-bottom">
+                    <h2>Threats & Inspection</h2>
+                    <select id="device-graph-selector" class="device-select">
+                        <option value="">Select Device for Graph...</option>
+                    </select>
+                </div>
+
+                <div class="inspector-content">
+                    <!-- Threat alerts panel -->
+                    <div class="card alert-card" id="alerts-container-card" style="display:none;">
+                        <h3>⚠️ Security & Threat Warnings</h3>
+                        <div class="alerts-list" id="security-alerts-list">
+                            <!-- Alert items populated by JS -->
+                        </div>
+                    </div>
+
+                    <div class="card graph-card">
+                        <h3>Signal Strength Timeline (RSSI vs Time)</h3>
+                        <div class="chart-container">
+                            <canvas id="rssiChart"></canvas>
+                        </div>
+                    </div>
+
+                    <div class="inspector-split">
+                        <div class="card detail-card">
+                            <h3>Selected Device Details</h3>
+                            <div class="details-list" id="selected-details">
+                                <div class="detail-row empty">Select a device from the list to inspect</div>
+                            </div>
+                        </div>
+
+                        <div class="card decoded-card">
+                            <h3>Decoded Advertisement Fields</h3>
+                            <div class="details-list" id="decoded-details">
+                                <div class="detail-row empty">Select a device to view decoded profiles</div>
+                            </div>
+                        </div>
+                    </div>
+
+                    <div class="card raw-packet-card">
+                        <div class="card-header-actions">
+                            <h3>Raw Data Frame</h3>
+                            <button id="btn-copy-raw" class="btn btn-sm">Copy Hex</button>
+                        </div>
+                        <div class="hex-viewer" id="raw-packet-hex">
+                            -- -- -- -- -- -- -- -- -- -- -- -- -- -- -- --
+                        </div>
+                    </div>
+                </div>
+            </section>
+        </main>
+    </div>
+    <script src="/app.js"></script>
+</body>
+</html>
+)rawliteral";
+
+const char style_css[] PROGMEM = R"rawliteral(
+:root {
+    --bg-dark: #0B0F19;
+    --panel-bg: rgba(22, 30, 49, 0.7);
+    --card-bg: rgba(30, 41, 67, 0.5);
+    --border-color: rgba(255, 255, 255, 0.08);
+    --accent-cyan: #00F0FF;
+    --accent-purple: #9D4EDD;
+    --text-primary: #F8FAFC;
+    --text-secondary: #94A3B8;
+    --text-muted: #64748B;
+    --signal-strong: #10B981;
+    --signal-medium: #F59E0B;
+    --signal-weak: #EF4444;
+    --font-sans: 'Outfit', sans-serif;
+    --font-mono: 'Space Mono', monospace;
+    --transition-speed: 0.3s;
+}
+* { box-sizing: border-box; margin: 0; padding: 0; }
+body {
+    background-color: var(--bg-dark);
+    background-image: 
+        radial-gradient(at 10% 20%, rgba(157, 78, 221, 0.08) 0px, transparent 50%),
+        radial-gradient(at 90% 80%, rgba(0, 240, 255, 0.06) 0px, transparent 50%);
+    background-attachment: fixed;
+    color: var(--text-primary);
+    font-family: var(--font-sans);
+    min-height: 100vh;
+    padding: 1.5rem;
+    overflow-x: hidden;
+}
+.app-container { max-width: 1600px; margin: 0 auto; display: flex; flex-direction: column; gap: 1.5rem; }
+header {
+    display: flex; justify-content: space-between; align-items: center;
+    background: var(--panel-bg); backdrop-filter: blur(12px); border: 1px solid var(--border-color);
+    padding: 1.25rem 2rem; border-radius: 16px; box-shadow: 0 8px 32px 0 rgba(0, 0, 0, 0.37);
+    flex-wrap: wrap; gap: 1rem;
+}
+.logo-area { display: flex; align-items: center; gap: 1rem; }
+.logo-icon { font-size: 2.25rem; filter: drop-shadow(0 0 8px var(--accent-cyan)); animation: pulse-glow 2s infinite alternate; }
+.title-meta h1 {
+    font-size: 1.5rem; font-weight: 800; letter-spacing: 2px;
+    background: linear-gradient(135deg, var(--text-primary) 30%, var(--accent-cyan));
+    -webkit-background-clip: text; -webkit-text-fill-color: transparent;
+}
+.subtitle { font-size: 0.75rem; text-transform: uppercase; letter-spacing: 3px; color: var(--accent-cyan); font-weight: 600; display: block; margin-top: -2px; }
+.control-panel { display: flex; align-items: center; gap: 1.5rem; flex-wrap: wrap; }
+.search-box input {
+    background: rgba(15, 23, 42, 0.6); border: 1px solid var(--border-color); border-radius: 8px;
+    color: var(--text-primary); padding: 0.6rem 1.2rem; font-family: var(--font-sans); font-size: 0.9rem;
+    width: 250px; transition: all var(--transition-speed);
+}
+.search-box input:focus { outline: none; border-color: var(--accent-cyan); box-shadow: 0 0 10px rgba(0, 240, 255, 0.2); }
+.filter-box { display: flex; flex-direction: column; gap: 0.25rem; font-size: 0.8rem; color: var(--text-secondary); }
+.filter-box label { display: flex; justify-content: space-between; }
+.filter-box label span { color: var(--accent-cyan); font-weight: 600; }
+.filter-box input[type="range"] { -webkit-appearance: none; width: 180px; height: 4px; border-radius: 2px; background: rgba(255, 255, 255, 0.1); outline: none; }
+.filter-box input[type="range"]::-webkit-slider-thumb {
+    -webkit-appearance: none; width: 14px; height: 14px; border-radius: 50%;
+    background: var(--accent-cyan); cursor: pointer; box-shadow: 0 0 8px var(--accent-cyan); transition: transform 0.1s;
+}
+.filter-box input[type="range"]::-webkit-slider-thumb:hover { transform: scale(1.3); }
+.status-indicator { display: flex; align-items: center; gap: 0.5rem; font-size: 0.85rem; color: var(--text-secondary); }
+.status-dot { width: 8px; height: 8px; border-radius: 50%; }
+.status-dot.online { background-color: var(--signal-strong); box-shadow: 0 0 8px var(--signal-strong); animation: status-blink 1.5s infinite; }
+.status-dot.offline { background-color: var(--signal-weak); box-shadow: 0 0 8px var(--signal-weak); }
+.stats-row { display: grid; grid-template-columns: repeat(auto-fit, minmax(280px, 1fr)); gap: 1rem; }
+.stat-card {
+    background: var(--panel-bg); backdrop-filter: blur(12px); border: 1px solid var(--border-color);
+    padding: 1.25rem 1.5rem; border-radius: 16px; display: flex; align-items: center; gap: 1.25rem;
+    transition: transform var(--transition-speed), border-color var(--transition-speed);
+}
+.stat-card:hover { transform: translateY(-4px); border-color: rgba(0, 240, 255, 0.3); }
+.stat-icon { font-size: 2rem; background: rgba(255, 255, 255, 0.03); width: 50px; height: 50px; display: flex; align-items: center; justify-content: center; border-radius: 12px; border: 1px solid var(--border-color); }
+.stat-info { display: flex; flex-direction: column; }
+.stat-label { font-size: 0.8rem; color: var(--text-secondary); text-transform: uppercase; letter-spacing: 1px; }
+.stat-value { font-size: 1.6rem; font-weight: 800; color: var(--text-primary); text-shadow: 0 0 10px rgba(255, 255, 255, 0.1); }
+.dashboard-grid { display: grid; grid-template-columns: 1fr 1fr; gap: 1.5rem; }
+@media (max-width: 1100px) { .dashboard-grid { grid-template-columns: 1fr; } }
+.panel {
+    background: var(--panel-bg); backdrop-filter: blur(12px); border: 1px solid var(--border-color);
+    border-radius: 16px; padding: 1.5rem; display: flex; flex-direction: column; gap: 1.25rem;
+    box-shadow: 0 8px 32px 0 rgba(0, 0, 0, 0.2);
+}
+.panel-header { display: flex; justify-content: space-between; align-items: center; }
+.panel-header h2 { font-size: 1.25rem; font-weight: 700; letter-spacing: 0.5px; display: flex; align-items: center; gap: 0.5rem; }
+.panel-header h2::before { content: ''; display: inline-block; width: 4px; height: 18px; background: var(--accent-cyan); border-radius: 2px; }
+.panel-meta { font-size: 0.8rem; color: var(--text-secondary); background: rgba(255, 255, 255, 0.05); padding: 0.3rem 0.75rem; border-radius: 20px; border: 1px solid var(--border-color); }
+.border-bottom { border-bottom: 1px solid var(--border-color); padding-bottom: 0.8rem; }
+.table-container { overflow-y: auto; max-height: 520px; border-radius: 8px; border: 1px solid var(--border-color); background: rgba(10, 15, 27, 0.3); }
+table { width: 100%; border-collapse: collapse; text-align: left; font-size: 0.85rem; }
+th {
+    background: rgba(21, 31, 57, 0.8); position: sticky; top: 0; z-index: 10;
+    color: var(--text-secondary); font-weight: 600; padding: 0.85rem 1rem;
+    border-bottom: 1px solid var(--border-color); text-transform: uppercase; font-size: 0.75rem; letter-spacing: 1px;
+}
+td { padding: 0.85rem 1rem; border-bottom: 1px solid rgba(255, 255, 255, 0.03); white-space: nowrap; cursor: pointer; transition: all 0.15s ease; }
+tbody tr:hover td { background: rgba(0, 240, 255, 0.05); color: #fff; }
+tbody tr.selected td { background: rgba(157, 78, 221, 0.15); border-bottom-color: rgba(157, 78, 221, 0.3); color: var(--accent-cyan); }
+.empty-row td { text-align: center; color: var(--text-muted); padding: 3rem; cursor: default; }
+.empty-row:hover td { background: transparent !important; }
+.rssi-badge { font-family: var(--font-mono); font-weight: 700; padding: 0.25rem 0.5rem; border-radius: 6px; font-size: 0.8rem; display: inline-block; text-align: center; min-width: 60px; }
+.rssi-strong { background: rgba(16, 185, 129, 0.15); color: var(--signal-strong); border: 1px solid rgba(16, 185, 129, 0.25); }
+.rssi-medium { background: rgba(245, 158, 11, 0.15); color: var(--signal-medium); border: 1px solid rgba(245, 158, 11, 0.25); }
+.rssi-weak { background: rgba(239, 68, 68, 0.15); color: var(--signal-weak); border: 1px solid rgba(239, 68, 68, 0.25); }
+.device-type { display: inline-flex; align-items: center; gap: 0.35rem; padding: 0.2rem 0.5rem; border-radius: 4px; background: rgba(255, 255, 255, 0.04); font-weight: 600; font-size: 0.75rem; }
+.btn { background: rgba(255, 255, 255, 0.05); border: 1px solid var(--border-color); color: var(--text-primary); border-radius: 8px; padding: 0.5rem 1.25rem; font-family: var(--font-sans); font-weight: 600; cursor: pointer; transition: all var(--transition-speed); }
+.btn:hover { background: rgba(255, 255, 255, 0.1); border-color: var(--text-secondary); }
+.btn-sm { padding: 0.25rem 0.6rem; font-size: 0.75rem; border-radius: 4px; }
+.btn.scanning { background: linear-gradient(135deg, rgba(239, 68, 68, 0.2), rgba(239, 68, 68, 0.4)); border-color: rgba(239, 68, 68, 0.5); box-shadow: 0 0 10px rgba(239, 68, 68, 0.15); }
+.btn.scanning:hover { background: linear-gradient(135deg, rgba(239, 68, 68, 0.3), rgba(239, 68, 68, 0.6)); box-shadow: 0 0 15px rgba(239, 68, 68, 0.3); }
+.btn.paused { background: linear-gradient(135deg, rgba(16, 185, 129, 0.2), rgba(16, 185, 129, 0.4)); border-color: rgba(16, 185, 129, 0.5); box-shadow: 0 0 10px rgba(16, 185, 129, 0.15); }
+.btn.paused:hover { background: linear-gradient(135deg, rgba(16, 185, 129, 0.3), rgba(16, 185, 129, 0.6)); box-shadow: 0 0 15px rgba(16, 185, 129, 0.3); }
+.device-select { background: rgba(15, 23, 42, 0.6); border: 1px solid var(--border-color); color: var(--text-primary); border-radius: 6px; padding: 0.35rem 0.75rem; font-family: var(--font-sans); font-size: 0.85rem; outline: none; max-width: 220px; }
+.device-select:focus { border-color: var(--accent-cyan); }
+.inspector-content { display: flex; flex-direction: column; gap: 1rem; }
+.card { background: var(--card-bg); border: 1px solid var(--border-color); border-radius: 12px; padding: 1rem 1.25rem; }
+.card h3 { font-size: 0.9rem; font-weight: 600; color: var(--accent-cyan); margin-bottom: 0.75rem; text-transform: uppercase; letter-spacing: 0.5px; }
+.graph-card { background: rgba(10, 15, 27, 0.6); }
+.chart-container { position: relative; height: 180px; width: 100%; }
+.inspector-split { display: grid; grid-template-columns: 1fr 1fr; gap: 1rem; }
+@media (max-width: 600px) { .inspector-split { grid-template-columns: 1fr; } }
+.details-list { display: flex; flex-direction: column; gap: 0.5rem; min-height: 120px; }
+.detail-row { display: flex; justify-content: space-between; font-size: 0.85rem; padding-bottom: 0.35rem; border-bottom: 1px solid rgba(255, 255, 255, 0.02); }
+.detail-row.empty { justify-content: center; align-items: center; color: var(--text-muted); font-style: italic; min-height: 100px; border-bottom: none; }
+.detail-label { color: var(--text-secondary); }
+.detail-val { color: var(--text-primary); font-weight: 600; word-break: break-all; text-align: right; }
+.detail-val.mono { font-family: var(--font-mono); font-size: 0.8rem; }
+.raw-packet-card .card-header-actions { display: flex; justify-content: space-between; align-items: center; margin-bottom: 0.5rem; }
+.raw-packet-card h3 { margin-bottom: 0 !important; }
+.hex-viewer {
+    background: rgba(10, 15, 27, 0.9); border: 1px solid rgba(255, 255, 255, 0.05); border-radius: 8px;
+    font-family: var(--font-mono); font-size: 0.8rem; padding: 0.75rem; line-height: 1.5; color: var(--text-primary);
+    word-break: break-all; text-shadow: 0 0 4px rgba(255, 255, 255, 0.1); min-height: 50px; letter-spacing: 1px;
+}
+
+/* Security Alert Styles */
+.alert-card {
+    background: rgba(22, 30, 49, 0.85) !important;
+    border: 1px solid rgba(255, 0, 85, 0.25) !important;
+    box-shadow: 0 0 15px rgba(255, 0, 85, 0.15);
+    margin-bottom: 0.5rem;
+}
+.alert-card h3 {
+    color: #FF0055 !important;
+    font-size: 0.95rem;
+    font-weight: 800;
+}
+.alerts-list {
+    display: flex;
+    flex-direction: column;
+    gap: 0.6rem;
+}
+.alert-item {
+    padding: 0.75rem;
+    border-radius: 8px;
+    background: rgba(11, 15, 25, 0.6);
+    border-left: 4px solid var(--accent-cyan);
+    font-size: 0.85rem;
+    transition: transform 0.2s ease;
+}
+.alert-item:hover {
+    transform: translateX(2px);
+}
+.alert-item.warning {
+    border-left-color: #FF0055;
+    background: rgba(255, 0, 85, 0.03);
+}
+.alert-header {
+    display: flex;
+    justify-content: space-between;
+    align-items: center;
+    margin-bottom: 0.25rem;
+}
+.alert-title {
+    font-weight: 700;
+    letter-spacing: 0.5px;
+    font-size: 0.8rem;
+    color: var(--accent-cyan);
+}
+.alert-item.warning .alert-title {
+    color: #FF0055;
+}
+.alert-time {
+    color: var(--text-muted);
+    font-size: 0.7rem;
+    font-family: var(--font-mono);
+}
+.alert-desc {
+    color: var(--text-primary);
+    line-height: 1.4;
+    margin-bottom: 0.35rem;
+}
+.alert-edu {
+    font-size: 0.75rem;
+    color: var(--text-secondary);
+    border-top: 1px solid rgba(255, 255, 255, 0.05);
+    padding-top: 0.35rem;
+    margin-top: 0.35rem;
+    font-style: italic;
+}
+
+@keyframes status-blink { 0% { opacity: 0.4; } 50% { opacity: 1; } 100% { opacity: 0.4; } }
+@keyframes pulse-glow { from { filter: drop-shadow(0 0 4px var(--accent-cyan)); } to { filter: drop-shadow(0 0 12px var(--accent-cyan)); } }
+)rawliteral";
+
+const char app_js[] PROGMEM = R"rawliteral(
+const devices = new Map();
+const activeAlerts = new Map(); // Key: alertId, Value: alertObj
+let selectedMac = null;
+let rssiChart = null;
+let packetCount = 0;
+let startTime = Date.now();
+let lastPacketTime = Date.now();
+let packetsThisSecond = 0;
+let packetRate = 0;
+let isScanning = true;
+let socket = null;
+let wsReconnectTimer = null;
+
+const bodyTable = document.getElementById("device-table-body");
+const searchInput = document.getElementById("search-input");
+const rssiThreshold = document.getElementById("rssi-threshold");
+const rssiVal = document.getElementById("rssi-val");
+const scanToggle = document.getElementById("scan-toggle");
+const connectionStatus = document.getElementById("connection-status");
+const statusDot = document.querySelector(".status-dot");
+const graphSelector = document.getElementById("device-graph-selector");
+
+const statDevicesCount = document.getElementById("stat-devices-count");
+const statPacketsCount = document.getElementById("stat-packets-count");
+const statPacketRate = document.getElementById("stat-packet-rate");
+const statUptime = document.getElementById("stat-uptime");
+
+const selectedDetails = document.getElementById("selected-details");
+const decodedDetails = document.getElementById("decoded-details");
+const rawPacketHex = document.getElementById("raw-packet-hex");
+const btnCopyRaw = document.getElementById("btn-copy-raw");
+
+const alertsContainer = document.getElementById("alerts-container-card");
+const securityAlertsList = document.getElementById("security-alerts-list");
+
+// Custom lightweight offline HTML5 Canvas Chart engine
+class SimpleSignalChart {
+    constructor(canvasId) {
+        this.canvas = document.getElementById(canvasId);
+        this.ctx = this.canvas.getContext("2d");
+        this.data = [];
+        window.addEventListener("resize", () => this.draw());
+    }
+    setData(rssiHistory) {
+        this.data = rssiHistory.map(pt => pt.y);
+        this.draw();
+    }
+    appendData(val) {
+        this.data.push(val);
+        if (this.data.length > 30) this.data.shift();
+        this.draw();
+    }
+    draw() {
+        const ctx = this.ctx;
+        const w = this.canvas.clientWidth;
+        const h = this.canvas.clientHeight;
+        this.canvas.width = w;
+        this.canvas.height = h;
+        ctx.clearRect(0, 0, w, h);
+        
+        // Draw grid
+        ctx.strokeStyle = "rgba(255, 255, 255, 0.05)";
+        ctx.lineWidth = 1;
+        const yLines = [-30, -50, -70, -90];
+        yLines.forEach(dbm => {
+            const y = this.mapY(dbm, h);
+            ctx.beginPath();
+            ctx.moveTo(0, y);
+            ctx.lineTo(w, y);
+            ctx.stroke();
+            ctx.fillStyle = "#94A3B8";
+            ctx.font = "10px Outfit";
+            ctx.fillText(`${dbm} dBm`, 5, y - 4);
+        });
+        
+        if (this.data.length < 2) return;
+        
+        // Neon signal line
+        ctx.strokeStyle = "#00F0FF";
+        ctx.lineWidth = 2.5;
+        ctx.shadowColor = "#00F0FF";
+        ctx.shadowBlur = 6;
+        ctx.beginPath();
+        const xStep = w / 29;
+        for (let i = 0; i < this.data.length; i++) {
+            const x = i * xStep;
+            const y = this.mapY(this.data[i], h);
+            if (i === 0) ctx.moveTo(x, y);
+            else ctx.lineTo(x, y);
+        }
+        ctx.stroke();
+        
+        // Fill gradient
+        ctx.shadowBlur = 0;
+        ctx.strokeStyle = "transparent";
+        const grad = ctx.createLinearGradient(0, 0, 0, h);
+        grad.addColorStop(0, "rgba(0, 240, 255, 0.2)");
+        grad.addColorStop(1, "rgba(157, 78, 221, 0.0)");
+        ctx.fillStyle = grad;
+        ctx.lineTo((this.data.length - 1) * xStep, h);
+        ctx.lineTo(0, h);
+        ctx.closePath();
+        ctx.fill();
+        
+        // Nodes
+        ctx.fillStyle = "#9D4EDD";
+        ctx.strokeStyle = "#00F0FF";
+        ctx.lineWidth = 1.5;
+        for (let i = 0; i < this.data.length; i++) {
+            const x = i * xStep;
+            const y = this.mapY(this.data[i], h);
+            ctx.beginPath();
+            ctx.arc(x, y, 3, 0, 2 * Math.PI);
+            ctx.fill();
+            ctx.stroke();
+        }
+    }
+    mapY(rssi, height) {
+        const minR = -100, maxR = -30;
+        const cl = Math.max(minR, Math.min(maxR, rssi));
+        return height - ((cl - minR) / (maxR - minR)) * height;
+    }
+}
+
+function connectWebSocket() {
+    const host = window.location.hostname || "192.168.4.1";
+    const wsUrl = `ws://${host}:81`;
+    
+    console.log(`Connecting to WebSocket: ${wsUrl}`);
+    connectionStatus.innerText = "Connecting...";
+    statusDot.className = "status-dot offline";
+
+    socket = new WebSocket(wsUrl);
+
+    socket.onopen = () => {
+        console.log("WebSocket connected.");
+        connectionStatus.innerText = "Connected";
+        statusDot.className = "status-dot online";
+        if (wsReconnectTimer) {
+            clearInterval(wsReconnectTimer);
+            wsReconnectTimer = null;
+        }
+    };
+
+    socket.onmessage = (event) => {
+        try {
+            const packet = JSON.parse(event.data);
+            handleIncomingPacket(packet);
+        } catch (e) {
+            console.error("Failed to parse JSON", e);
+        }
+    };
+
+    socket.onclose = () => {
+        console.warn("WebSocket closed. Reconnecting...");
+        connectionStatus.innerText = "Disconnected";
+        statusDot.className = "status-dot offline";
+        if (!wsReconnectTimer) {
+            wsReconnectTimer = setInterval(connectWebSocket, 3000);
+        }
+    };
+
+    socket.onerror = (err) => {
+        console.error("WebSocket error:", err);
+    };
+}
+
+function handleIncomingPacket(packet) {
+    packetCount++;
+    packetsThisSecond++;
+    
+    const mac = packet.mac;
+    const now = Date.now();
+    
+    if (!devices.has(mac)) {
+        devices.set(mac, {
+            mac: mac,
+            name: packet.name || "Unknown",
+            rssiHistory: [],
+            type: classifyDevice(packet),
+            packetCount: 0,
+            firstSeen: now,
+            lastSeen: now,
+            raw: packet.raw,
+            len: packet.len,
+            addrType: packet.addrType
+        });
+        updateGraphSelector();
+    }
+    
+    const dev = devices.get(mac);
+    const oldRssiHistory = [...dev.rssiHistory];
+    dev.rssi = packet.rssi;
+    dev.lastSeen = now;
+    dev.packetCount++;
+    dev.raw = packet.raw;
+    dev.len = packet.len;
+    dev.addrType = packet.addrType;
+    if (packet.name && packet.name !== "Unknown") {
+        dev.name = packet.name;
+    }
+    
+    dev.rssiHistory.push({ t: now, y: packet.rssi });
+    if (dev.rssiHistory.length > 50) {
+        dev.rssiHistory.shift();
+    }
+    
+    // ==========================================
+    // Part C Threat Detection Logic
+    // ==========================================
+    
+    // 1. Detect public MAC tracking risk (addressType 0 = Public, 1 = Random)
+    if (dev.addrType === 0) {
+        triggerAlert(
+            "public_mac",
+            dev.mac,
+            "TRACKING RISK (Static MAC)",
+            `Device "${dev.name}" (${dev.mac}) broadcasts a static, non-randomized hardware MAC.`,
+            "Educational explanation: Modern privacy-conscious devices rotate their MAC address every 15 minutes to prevent tracking. A static MAC never changes, meaning commercial sniffer nodes can easily log your patterns over days or weeks.",
+            false
+        );
+    }
+
+    // 2. Detect Apple "Find My" Network Telemetry Beacons
+    if (packet.raw.includes("4C001219") || packet.raw.includes("1219E")) {
+        triggerAlert(
+            "find_my",
+            dev.mac,
+            "APPLE FIND MY BEACON",
+            `Apple tracker signature ("4C001219") broadcasted by "${dev.name}" (${dev.mac}).`,
+            "Educational explanation: Apple devices (like AirTags) use offline encrypted beacons to broadcast a changing public key. Nearby helper iPhones receive this, attach their GPS, and upload it to Apple's network. Sniffing this raw packet shows that tracing is active, but the coordinates themselves are safely encrypted.",
+            false
+        );
+    }
+
+    // 3. Alert when RSSI changes rapidly (Fast Approach Alert)
+    if (oldRssiHistory.length >= 3) {
+        const oldestVal = oldRssiHistory[0];
+        const timeDiffSec = (now - oldestVal.t) / 1000;
+        if (timeDiffSec > 0 && timeDiffSec <= 8) {
+            const rssiDelta = packet.rssi - oldestVal.y;
+            if (rssiDelta >= 15) {
+                triggerAlert(
+                    "approach",
+                    dev.mac,
+                    "⚠️ RAPID PROXIMITY EVENT",
+                    `Device "${dev.name}" is approaching rapidly! Signal rose +${rssiDelta} dBm in ${timeDiffSec.toFixed(1)}s.`,
+                    "Educational explanation: A sudden increase in RSSI (signal strength) indicates that the physical transmitter is moving fast towards the sniffer, which can trigger immediate logging rules.",
+                    true
+                );
+            }
+        }
+    }
+
+    renderTable();
+    updateStats();
+    
+    if (selectedMac === mac) {
+        updateInspector(dev);
+        appendChartData(now, packet.rssi);
+    }
+}
+
+function triggerAlert(alertType, mac, title, desc, edu, isWarning) {
+    const alertId = `${alertType}_${mac}`;
+    
+    // Throttling to prevent alert spamming (trigger same alert max once every 30s)
+    if (activeAlerts.has(alertId)) {
+        const lastTime = activeAlerts.get(alertId).time;
+        if (Date.now() - lastTime < 30000) {
+            activeAlerts.get(alertId).time = Date.now();
+            return;
+        }
+    }
+    
+    activeAlerts.set(alertId, {
+        time: Date.now(),
+        mac: mac,
+        title: title,
+        desc: desc,
+        edu: edu,
+        isWarning: isWarning
+    });
+    
+    renderAlerts();
+}
+
+function renderAlerts() {
+    if (activeAlerts.size === 0) {
+        alertsContainer.style.display = "none";
+        return;
+    }
+    
+    alertsContainer.style.display = "block";
+    
+    const sortedAlerts = Array.from(activeAlerts.values())
+        .sort((a, b) => b.time - a.time)
+        .slice(0, 3); // Display only the 3 most recent alerts
+        
+    let html = "";
+    sortedAlerts.forEach(alert => {
+        const warningClass = alert.isWarning ? "alert-item warning" : "alert-item";
+        const timeStr = new Date(alert.time).toLocaleTimeString();
+        html += `
+            <div class="${warningClass}">
+                <div class="alert-header">
+                    <span class="alert-title">${alert.title}</span>
+                    <span class="alert-time">${timeStr}</span>
+                </div>
+                <div class="alert-desc">${alert.desc}</div>
+                <div class="alert-edu">${alert.edu}</div>
+            </div>
+        `;
+    });
+    securityAlertsList.innerHTML = html;
+}
+
+function classifyDevice(packet) {
+    const name = (packet.name || "").toLowerCase();
+    const raw = packet.raw || "";
+    if (raw.includes("4C000215") || raw.includes("0303AAFE") || raw.includes("1AFF4C000215") || raw.includes("4C001219")) return "Beacon";
+    if (name.includes("watch") || name.includes("fitbit") || name.includes("band") || name.includes("buds") || name.includes("smart")) return "Wearable";
+    if (name.includes("temp") || name.includes("hum") || name.includes("sensor") || name.includes("tag") || name.includes("batt")) return "Sensor";
+    if (name.includes("iphone") || name.includes("galaxy") || name.includes("phone") || name.includes("android")) return "Mobile";
+    return "BLE Device";
+}
+
+function decodePayload(hexStr) {
+    if (!hexStr || hexStr.length === 0) return [];
+    const fields = [];
+    let idx = 0;
+    const bytes = [];
+    for (let i = 0; i < hexStr.length; i += 2) {
+        bytes.push(parseInt(hexStr.substring(i, i + 2), 16));
+    }
+    
+    while (idx < bytes.length) {
+        const len = bytes[idx];
+        if (len === 0 || idx + len >= bytes.length) break;
+        const type = bytes[idx + 1];
+        const data = bytes.slice(idx + 2, idx + 1 + len);
+        let label = "Unknown Type";
+        let val = "";
+        
+        switch (type) {
+            case 0x01:
+                label = "Flags";
+                const flags = data[0];
+                const list = [];
+                if (flags & 0x01) list.push("LE Limited");
+                if (flags & 0x02) list.push("LE General");
+                if (flags & 0x04) list.push("BR/EDR Not Supported");
+                val = list.join(" | ") || `0x${flags.toString(16)}`;
+                break;
+            case 0x03:
+                label = "16-bit Service UUIDs";
+                const uuids16 = [];
+                for (let i = 0; i < data.length; i += 2) {
+                    if (i + 1 < data.length) {
+                        const uuid = ((data[i+1] << 8) | data[i]).toString(16).toUpperCase().padStart(4, '0');
+                        uuids16.push(`0x${uuid}`);
+                    }
+                }
+                val = uuids16.join(", ");
+                break;
+            case 0x08:
+            case 0x09:
+                label = "Local Name";
+                val = String.fromCharCode.apply(null, data);
+                break;
+            case 0x0A:
+                label = "Tx Power Level";
+                const pwr = data[0] > 127 ? data[0] - 256 : data[0];
+                val = `${pwr} dBm`;
+                break;
+            case 0x16: // Service Data AD Type (contains battery/sensor data)
+                label = "Service Data (16-bit)";
+                if (data.length >= 2) {
+                    const serviceUuid = (data[1] << 8) | data[0];
+                    const serviceDataBytes = data.slice(2);
+                    val = `Service: 0x${serviceUuid.toString(16).toUpperCase().padStart(4, '0')}`;
+                    if (serviceUuid === 0x180F && serviceDataBytes.length >= 1) {
+                        val += `<br><strong>Battery Level: ${serviceDataBytes[0]}%</strong>`;
+                    } else if (serviceUuid === 0x1809 && serviceDataBytes.length >= 1) {
+                        val += `<br><strong>Temperature: ${serviceDataBytes[0]}°C</strong>`;
+                    } else if (serviceDataBytes.length > 0) {
+                        val += `<br>Data: ${bytesToHex(serviceDataBytes)}`;
+                    }
+                } else {
+                    val = bytesToHex(data);
+                }
+                break;
+            case 0xFF:
+                label = "Manufacturer Data";
+                if (data.length >= 2) {
+                    const companyId = (data[1] << 8) | data[0];
+                    let compName = mapCompanyId(companyId);
+                    let subHex = bytesToHex(data.slice(2));
+                    val = `Company: ${compName} (0x${companyId.toString(16).toUpperCase().padStart(4, '0')})`;
+                    
+                    if (companyId === 0x004C && data[2] === 0x02 && data[3] === 0x15) {
+                        label = "iBeacon Packet";
+                        const uuid = bytesToHex(data.slice(4, 20)).match(/.{1,8}/g).join('-');
+                        const major = (data[20] << 8) | data[21];
+                        const minor = (data[22] << 8) | data[23];
+                        const txPower = data[24] > 127 ? data[24] - 256 : data[24];
+                        val = `UUID: ${uuid}<br>Major: ${major}<br>Minor: ${minor}<br>Tx Power: ${txPower} dBm`;
+                    } else if (companyId === 0x004C && data[2] === 0x12 && data[3] === 0x19) {
+                        label = "Find My Tracking Telemetry";
+                        val = `Apple Find My beacon tracking broadcast detected.<br>Public Key: <span class="mono">${bytesToHex(data.slice(4))}</span>`;
+                    } else if (subHex.length > 0) {
+                        val += `<br>Payload: <span class="mono">${subHex}</span>`;
+                    }
+                } else {
+                    val = bytesToHex(data);
+                }
+                break;
+            default:
+                label = `Type 0x${type.toString(16).toUpperCase().padStart(2, '0')}`;
+                val = bytesToHex(data);
+                break;
+        }
+        fields.push({ label, val });
+        idx += len + 1;
+    }
+    return fields;
+}
+
+function bytesToHex(bytes) { return bytes.map(b => b.toString(16).padStart(2, '0').toUpperCase()).join(' '); }
+function mapCompanyId(id) {
+    const companies = { 0x004C: "Apple", 0x0006: "Microsoft", 0x00E0: "Google", 0x0059: "Nordic", 0x0075: "Samsung" };
+    return companies[id] || "Unknown Corp";
+}
+
+function updateStats() {
+    statDevicesCount.innerText = devices.size;
+    statPacketsCount.innerText = packetCount;
+    const seconds = Math.floor((Date.now() - startTime) / 1000);
+    const hrs = Math.floor(seconds / 3600).toString().padStart(2, '0');
+    const mins = Math.floor((seconds % 3600) / 60).toString().padStart(2, '0');
+    const secs = (seconds % 60).toString().padStart(2, '0');
+    statUptime.innerText = `${hrs}:${mins}:${secs}`;
+}
+
+setInterval(() => {
+    packetRate = packetsThisSecond;
+    statPacketRate.innerText = `${packetRate} /s`;
+    packetsThisSecond = 0;
+}, 1000);
+
+setInterval(() => { if (devices.size > 0) renderTable(); }, 2000);
+
+function renderTable() {
+    const searchVal = searchInput.value.toLowerCase().trim();
+    const rssiLimit = parseInt(rssiThreshold.value);
+    
+    const sortedDevs = Array.from(devices.values())
+        .filter(d => {
+            const matchesSearch = d.mac.toLowerCase().includes(searchVal) || d.name.toLowerCase().includes(searchVal);
+            return matchesSearch && d.rssi >= rssiLimit;
+        })
+        .sort((a, b) => b.rssi - a.rssi);
+        
+    document.getElementById("visible-count").innerText = `Showing ${sortedDevs.length} devices`;
+
+    if (sortedDevs.length === 0) {
+        bodyTable.innerHTML = `<tr class="empty-row"><td colspan="6">Waiting for BLE packets...</td></tr>`;
+        return;
+    }
+
+    let rowsHtml = "";
+    sortedDevs.forEach(dev => {
+        const timeDiff = Math.max(0, Math.floor((Date.now() - dev.lastSeen) / 1000));
+        let timeStr = timeDiff === 0 ? "Just now" : `${timeDiff}s ago`;
+        let rssiClass = dev.rssi < -80 ? "rssi-weak" : (dev.rssi < -60 ? "rssi-medium" : "rssi-strong");
+        let rowClass = dev.mac === selectedMac ? "class='selected'" : "";
+        let icon = dev.type === "Beacon" ? "📡" : (dev.type === "Wearable" ? "⌚" : (dev.type === "Sensor" ? "🌡️" : "📱"));
+        
+        rowsHtml += `
+            <tr ${rowClass} onclick="selectDevice('${dev.mac}')">
+                <td><strong>${escapeHtml(dev.name)}</strong></td>
+                <td><code class="mono">${dev.mac}</code></td>
+                <td><span class="rssi-badge ${rssiClass}">${dev.rssi} dBm</span></td>
+                <td><span class="device-type">${icon} ${dev.type}</span></td>
+                <td>${dev.packetCount}</td>
+                <td>${timeStr}</td>
+            </tr>
+        `;
+    });
+    bodyTable.innerHTML = rowsHtml;
+}
+
+function escapeHtml(str) { return str.replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;"); }
+
+function updateGraphSelector() {
+    const currentSel = graphSelector.value;
+    let optionsHtml = '<option value="">Select Device for Graph...</option>';
+    Array.from(devices.values()).sort((a,b) => b.rssi - a.rssi).forEach(dev => {
+        optionsHtml += `<option value="${dev.mac}">${dev.name} (${dev.mac})</option>`;
+    });
+    graphSelector.innerHTML = optionsHtml;
+    graphSelector.value = currentSel;
+}
+
+window.selectDevice = function(mac) {
+    selectedMac = mac;
+    const dev = devices.get(mac);
+    renderTable();
+    graphSelector.value = mac;
+    resetChart(dev);
+    updateInspector(dev);
+};
+
+graphSelector.addEventListener("change", (e) => { if (e.target.value) selectDevice(e.target.value); });
+
+function updateInspector(dev) {
+    const timeDiff = Math.max(0, Math.floor((Date.now() - dev.lastSeen) / 1000));
+    const firstSeenStr = new Date(dev.firstSeen).toLocaleTimeString();
+    const addrTypeStr = dev.addrType === 0 ? "Public (Fixed HW)" : "Random (Rotating Private)";
+
+    selectedDetails.innerHTML = `
+        <div class="detail-row"><span class="detail-label">Device Name</span><span class="detail-val"><strong>${escapeHtml(dev.name)}</strong></span></div>
+        <div class="detail-row"><span class="detail-label">MAC Address</span><span class="detail-val mono">${dev.mac}</span></div>
+        <div class="detail-row"><span class="detail-label">Address Type</span><span class="detail-val">${addrTypeStr}</span></div>
+        <div class="detail-row"><span class="detail-label">Signal Strength</span><span class="detail-val">${dev.rssi} dBm</span></div>
+        <div class="detail-row"><span class="detail-label">Payload Size</span><span class="detail-val">${dev.len} bytes</span></div>
+        <div class="detail-row"><span class="detail-label">Packets Logged</span><span class="detail-val">${dev.packetCount}</span></div>
+        <div class="detail-row"><span class="detail-label">First Seen</span><span class="detail-val">${firstSeenStr}</span></div>
+        <div class="detail-row"><span class="detail-label">Last Seen</span><span class="detail-val">${timeDiff}s ago</span></div>
+    `;
+
+    const decodedFields = decodePayload(dev.raw);
+    if (decodedFields.length === 0) {
+        decodedDetails.innerHTML = `<div class="detail-row empty">No decodable AD fields.</div>`;
+    } else {
+        let decHtml = "";
+        decodedFields.forEach(f => {
+            decHtml += `<div class="detail-row"><span class="detail-label">${f.label}</span><span class="detail-val">${f.val}</span></div>`;
+        });
+        decodedDetails.innerHTML = decHtml;
+    }
+
+    let hexView = "";
+    for (let i = 0; i < dev.raw.length; i += 2) { hexView += dev.raw.substring(i, i + 2) + " "; }
+    rawPacketHex.innerText = hexView.trim() || "-- -- -- --";
+}
+
+btnCopyRaw.addEventListener("click", () => {
+    if (selectedMac && devices.has(selectedMac)) {
+        navigator.clipboard.writeText(devices.get(selectedMac).raw)
+            .then(() => {
+                const orig = btnCopyRaw.innerText;
+                btnCopyRaw.innerText = "Copied!";
+                setTimeout(() => btnCopyRaw.innerText = orig, 1500);
+            });
+    }
+});
+
+function initChart() {
+    rssiChart = new SimpleSignalChart("rssiChart");
+}
+
+function resetChart(dev) {
+    if (rssiChart) rssiChart.setData(dev.rssiHistory);
+}
+
+function appendChartData(time, val) {
+    if (rssiChart) rssiChart.appendData(val);
+}
+
+searchInput.addEventListener("input", renderTable);
+rssiThreshold.addEventListener("input", (e) => { rssiVal.innerText = e.target.value; renderTable(); });
+
+scanToggle.addEventListener("click", () => {
+    if (isScanning) {
+        if (socket && socket.readyState === WebSocket.OPEN) socket.send("pause");
+        isScanning = false;
+        scanToggle.innerText = "Resume Scan";
+        scanToggle.className = "btn paused";
+    } else {
+        if (socket && socket.readyState === WebSocket.OPEN) socket.send("resume");
+        isScanning = true;
+        scanToggle.innerText = "Pause Scan";
+        scanToggle.className = "btn scanning";
+    }
+});
+
+window.addEventListener("load", () => {
+    initChart();
+    connectWebSocket();
+    updateStats();
+});
+)rawliteral";
+
+// ==========================================
+// BLE Scan Callback Parser
+// ==========================================
+class MyAdvertisedDeviceCallbacks: public BLEAdvertisedDeviceCallbacks {
+    void onResult(BLEAdvertisedDevice advertisedDevice) {
+      String mac = advertisedDevice.getAddress().toString().c_str();
+      mac.toUpperCase();
+      int rssi = advertisedDevice.getRSSI();
+      
+      String name = advertisedDevice.getName().c_str();
+      if (name.length() == 0) {
+        name = "Unknown";
+      }
+      
+      String rawHex = "";
+      uint8_t* payload = advertisedDevice.getPayload();
+      size_t len = advertisedDevice.getPayloadLength();
+      for (size_t i = 0; i < len; i++) {
+        char temp[3];
+        sprintf(temp, "%02X", payload[i]);
+        rawHex += temp;
+      }
+      
+      // Get address type (0 = Public, 1 = Random/Private)
+      int addrType = (int)advertisedDevice.getAddressType();
+      
+      // Construct packet JSON
+      String json = "{";
+      json += "\"mac\":\"" + mac + "\",";
+      json += "\"rssi\":" + String(rssi) + ",";
+      json += "\"raw\":\"" + rawHex + "\",";
+      json += "\"len\":" + String(len) + ",";
+      json += "\"name\":\"" + name + "\",";
+      json += "\"addrType\":" + String(addrType);
+      json += "}";
+      
+      // Broadcast to WebSocket clients
+      webSocket.broadcastTXT(json);
+    }
+};
+
+// ==========================================
+// Setup and Initialization
+// ==========================================
+void setup() {
+  Serial.begin(115200);
+  delay(1000);
+
+  // Configure Access Point (AP) mode
+  Serial.println("Configuring Access Point...");
+  WiFi.softAP(ap_ssid, ap_pass);
+  IPAddress myIP = WiFi.softAPIP();
+  Serial.print("AP IP address: ");
+  Serial.println(myIP);
+
+  // Initialize mDNS Local Domain (blesniffer.local)
+  if (!MDNS.begin("blesniffer")) {
+    Serial.println("Error setting up MDNS responder!");
+  } else {
+    Serial.println("mDNS responder active. Access at: http://blesniffer.local");
+  }
+
+  // Handle static page routing (from PROGMEM - NO SPIFFS REQUIRED)
+  server.on("/", HTTP_GET, []() {
+    server.send_P(200, "text/html", index_html);
+  });
+  
+  server.on("/style.css", HTTP_GET, []() {
+    server.send_P(200, "text/css", style_css);
+  });
+  
+  server.on("/app.js", HTTP_GET, []() {
+    server.send_P(200, "application/javascript", app_js);
+  });
+
+  server.begin();
+  Serial.println("HTTP server started.");
+
+  // WebSocket Server on Port 81
+  webSocket.begin();
+  webSocket.onEvent(onWebSocketEvent);
+  Serial.println("WebSocket server active on port 81.");
+
+  // BLE initialization
+  BLEDevice::init("ESP32_BLE_Sniffer");
+  pBLEScan = BLEDevice::getScan();
+  pBLEScan->setAdvertisedDeviceCallbacks(new MyAdvertisedDeviceCallbacks());
+  pBLEScan->setActiveScan(true); 
+  pBLEScan->setInterval(100);
+  pBLEScan->setWindow(99);
+}
+
+// ==========================================
+// Main Loop
+// ==========================================
+void loop() {
+  server.handleClient();
+  webSocket.loop();
+
+  if (isScanning) {
+    pBLEScan->start(1, false); // Scan for 1 second, non-blocking
+    pBLEScan->clearResults();   // Clear buffer memory
+  } else {
+    delay(100);
+  }
+}
+
+// WebSocket Event Handler (Obeying dashboard pause/resume commands)
+void onWebSocketEvent(uint8_t num, WStype_t type, uint8_t * payload, size_t length) {
+  if (type == WStype_TEXT) {
+    String cmd = String((char*)payload).substring(0, length);
+    Serial.printf("[%u] Received command: %s\n", num, cmd.c_str());
+    if (cmd == "pause") {
+      isScanning = false;
+      Serial.println("BLE Sniffer scan execution paused.");
+    } else if (cmd == "resume") {
+      isScanning = true;
+      Serial.println("BLE Sniffer scan execution resumed.");
+    }
+  }
+}
