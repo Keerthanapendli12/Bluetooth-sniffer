@@ -2425,6 +2425,908 @@ void loop() {
   delay(5000); // Wait 5 seconds between scan runs
 }
 
+PART - A
+#include <WiFi.h>
+#include <WebServer.h>
+#include <WebSocketsServer.h>
+#include <BLEDevice.h>
+#include <BLEUtils.h>
+#include <BLEScan.h>
+
+const char* AP_SSID = "ESP32-BLE-Monitor";
+const char* AP_PASSWORD = "12345678";
+
+WebServer server(80);
+WebSocketsServer webSocket(81);
+
+BLEScan* pBLEScan;
+
+// Maximum unique BLE devices
+#define MAX_DEVICES 50
+
+// --------------------------------------------------
+// DEVICE RECORD
+// --------------------------------------------------
+
+struct DeviceRecord {
+  bool used;
+
+  String mac;
+  String name;
+  String serviceData;
+
+  int rssiHistory[10];
+  int rssiCount;
+  int rssiIndex;
+
+  unsigned long firstSeen;
+  unsigned long lastSeen;
+};
+
+DeviceRecord devices[MAX_DEVICES];
+
+
+// --------------------------------------------------
+// FIND DEVICE
+// --------------------------------------------------
+
+int findDevice(const String &mac) {
+
+  for (int i = 0; i < MAX_DEVICES; i++) {
+
+    if (devices[i].used &&
+        devices[i].mac == mac) {
+
+      return i;
+    }
+  }
+
+  return -1;
+}
+
+
+// --------------------------------------------------
+// CREATE DEVICE
+// --------------------------------------------------
+
+int createDevice(const String &mac) {
+
+  for (int i = 0; i < MAX_DEVICES; i++) {
+
+    if (!devices[i].used) {
+
+      devices[i].used = true;
+      devices[i].mac = mac;
+      devices[i].name = "";
+      devices[i].serviceData = "";
+
+      devices[i].rssiCount = 0;
+      devices[i].rssiIndex = 0;
+
+      devices[i].firstSeen = millis();
+      devices[i].lastSeen = millis();
+
+      return i;
+    }
+  }
+
+  return -1;
+}
+
+
+// --------------------------------------------------
+// ADD RSSI
+// --------------------------------------------------
+
+void addRSSI(DeviceRecord &device, int rssi) {
+
+  device.rssiHistory[device.rssiIndex] = rssi;
+
+  device.rssiIndex++;
+
+  if (device.rssiIndex >= 10) {
+    device.rssiIndex = 0;
+  }
+
+  if (device.rssiCount < 10) {
+    device.rssiCount++;
+  }
+}
+
+
+// --------------------------------------------------
+// RSSI HISTORY JSON
+// --------------------------------------------------
+
+String getRSSIHistory(DeviceRecord &device) {
+
+  String result = "[";
+
+  for (int i = 0; i < device.rssiCount; i++) {
+
+    int index =
+      (device.rssiIndex -
+       device.rssiCount +
+       i +
+       10) % 10;
+
+    result += String(device.rssiHistory[index]);
+
+    if (i < device.rssiCount - 1) {
+      result += ",";
+    }
+  }
+
+  result += "]";
+
+  return result;
+}
+
+
+// --------------------------------------------------
+// SERVICE DATA
+// --------------------------------------------------
+
+String getServiceData(BLEAdvertisedDevice &device) {
+
+  if (!device.haveServiceData()) {
+    return "";
+  }
+
+  String data = device.getServiceData();
+
+  String result = "";
+
+  for (int i = 0; i < data.length(); i++) {
+
+    uint8_t value = (uint8_t)data[i];
+
+    if (value < 16) {
+      result += "0";
+    }
+
+    result += String(value, HEX);
+
+    if (i < data.length() - 1) {
+      result += " ";
+    }
+  }
+
+  result.toUpperCase();
+
+  return result;
+}
+
+
+// --------------------------------------------------
+// CREATE JSON
+// --------------------------------------------------
+
+String createJSON(DeviceRecord &device) {
+
+  String json = "{";
+
+  json += "\"mac\":\"";
+  json += device.mac;
+  json += "\",";
+
+  json += "\"name\":\"";
+  json += device.name;
+  json += "\",";
+
+  int latest =
+    (device.rssiIndex - 1 + 10) % 10;
+
+  json += "\"rssi\":";
+  json += String(device.rssiHistory[latest]);
+  json += ",";
+
+  json += "\"rssiHistory\":";
+  json += getRSSIHistory(device);
+  json += ",";
+
+  json += "\"serviceData\":\"";
+  json += device.serviceData;
+  json += "\",";
+
+  json += "\"firstSeen\":";
+  json += String(device.firstSeen);
+  json += ",";
+
+  json += "\"lastSeen\":";
+  json += String(device.lastSeen);
+
+  json += "}";
+
+  return json;
+}
+
+
+// --------------------------------------------------
+// BLE CALLBACK
+// --------------------------------------------------
+
+class MyAdvertisedDeviceCallbacks :
+  public BLEAdvertisedDeviceCallbacks {
+
+  void onResult(BLEAdvertisedDevice device) {
+
+    String mac =
+      device.getAddress()
+            .toString()
+            .c_str();
+
+    int index = findDevice(mac);
+
+    if (index == -1) {
+      index = createDevice(mac);
+    }
+
+    if (index == -1) {
+      return;
+    }
+
+    DeviceRecord &record =
+      devices[index];
+
+    record.lastSeen = millis();
+
+    // Device name
+
+    if (device.haveName()) {
+
+      record.name =
+        device.getName().c_str();
+    }
+
+    // Service Data
+
+    String serviceData =
+      getServiceData(device);
+
+    if (serviceData.length() > 0) {
+
+      record.serviceData =
+        serviceData;
+    }
+
+    // RSSI
+
+    int rssi =
+      device.getRSSI();
+
+    addRSSI(
+      record,
+      rssi
+    );
+
+    // JSON
+
+    String json =
+      createJSON(record);
+
+    // Send live data to browser
+
+    webSocket.broadcastTXT(json);
+
+    // Serial output
+
+    Serial.println(
+      "-----------------------------"
+    );
+
+    Serial.print("MAC: ");
+    Serial.println(record.mac);
+
+    Serial.print("Name: ");
+    Serial.println(record.name);
+
+    Serial.print("RSSI: ");
+    Serial.println(rssi);
+
+    Serial.print("Service Data: ");
+    Serial.println(record.serviceData);
+  }
+};
+
+
+// --------------------------------------------------
+// DASHBOARD HTML
+// --------------------------------------------------
+
+const char INDEX_HTML[] PROGMEM = R"rawliteral(
+<!DOCTYPE html>
+
+<html>
+
+<head>
+
+<meta name="viewport"
+content="width=device-width, initial-scale=1">
+
+<title>ESP32 BLE Monitor</title>
+
+<style>
+
+body {
+    font-family: Arial, sans-serif;
+    margin: 0;
+    padding: 20px;
+    background: #f3f3f3;
+}
+
+h1 {
+    text-align: center;
+}
+
+.status {
+    text-align: center;
+    font-weight: bold;
+    margin: 15px;
+}
+
+.controls {
+    text-align: center;
+    margin-bottom: 20px;
+}
+
+button {
+    padding: 10px 16px;
+    margin: 5px;
+    cursor: pointer;
+}
+
+table {
+    width: 100%;
+    border-collapse: collapse;
+    background: white;
+}
+
+th {
+    background: #dddddd;
+}
+
+th, td {
+    border: 1px solid #cccccc;
+    padding: 9px;
+    text-align: left;
+}
+
+#packetCount {
+    font-weight: bold;
+}
+
+</style>
+
+</head>
+
+
+<body>
+
+<h1>ESP32 BLE Monitor</h1>
+
+<div class="status">
+
+Connection:
+<span id="status">
+Connecting...
+</span>
+
+</div>
+
+
+<div class="controls">
+
+<button onclick="exportCSV()">
+Save CSV
+</button>
+
+<button onclick="exportJSON()">
+Save JSON
+</button>
+
+<button onclick="clearCapture()">
+Clear
+</button>
+
+</div>
+
+
+<h3>
+
+Unique Devices:
+<span id="deviceCount">
+0
+</span>
+
+</h3>
+
+
+<h3>
+
+Packets Received:
+<span id="packetCount">
+0
+</span>
+
+</h3>
+
+
+<table>
+
+<thead>
+
+<tr>
+
+<th>MAC Address</th>
+
+<th>Name</th>
+
+<th>RSSI</th>
+
+<th>RSSI History</th>
+
+<th>Service Data</th>
+
+</tr>
+
+</thead>
+
+
+<tbody id="deviceTable">
+
+</tbody>
+
+</table>
+
+
+<script>
+
+let devices = {};
+
+let packetCount = 0;
+
+let socket;
+
+
+// ------------------------------------------------
+// CONNECT WEBSOCKET
+// ------------------------------------------------
+
+function connectWebSocket() {
+
+    socket = new WebSocket(
+        "ws://" +
+        window.location.hostname +
+        ":81/"
+    );
+
+
+    socket.onopen = function() {
+
+        document.getElementById(
+            "status"
+        ).innerText = "LIVE";
+
+    };
+
+
+    socket.onclose = function() {
+
+        document.getElementById(
+            "status"
+        ).innerText =
+        "DISCONNECTED";
+
+        setTimeout(
+            connectWebSocket,
+            2000
+        );
+
+    };
+
+
+    socket.onmessage = function(event) {
+
+        let data;
+
+        try {
+
+            data =
+            JSON.parse(event.data);
+
+        }
+
+        catch(error) {
+
+            return;
+
+        }
+
+
+        devices[data.mac] = data;
+
+        packetCount++;
+
+        document.getElementById(
+            "packetCount"
+        ).innerText =
+        packetCount;
+
+
+        updateTable();
+
+    };
+
+}
+
+
+// ------------------------------------------------
+// UPDATE TABLE
+// ------------------------------------------------
+
+function updateTable() {
+
+    let table =
+        document.getElementById(
+            "deviceTable"
+        );
+
+
+    table.innerHTML = "";
+
+
+    Object.values(devices).forEach(
+        function(device) {
+
+            let row =
+                table.insertRow();
+
+
+            row.insertCell().innerText =
+                device.mac;
+
+
+            row.insertCell().innerText =
+                device.name ||
+                "Unknown";
+
+
+            row.insertCell().innerText =
+                device.rssi +
+                " dBm";
+
+
+            row.insertCell().innerText =
+                device.rssiHistory.join(
+                    ", "
+                );
+
+
+            row.insertCell().innerText =
+                device.serviceData ||
+                "-";
+
+        }
+    );
+
+
+    document.getElementById(
+        "deviceCount"
+    ).innerText =
+    Object.keys(devices).length;
+
+}
+
+
+// ------------------------------------------------
+// EXPORT CSV
+// ------------------------------------------------
+
+function exportCSV() {
+
+    let csv =
+    "MAC,Name,RSSI,RSSI_History,ServiceData\n";
+
+
+    Object.values(devices).forEach(
+        function(device) {
+
+            csv +=
+            '"' +
+            device.mac +
+            '","' +
+            device.name +
+            '","' +
+            device.rssi +
+            '","' +
+            device.rssiHistory.join(
+                " "
+            ) +
+            '","' +
+            device.serviceData +
+            '"\n';
+
+        }
+    );
+
+
+    downloadFile(
+        csv,
+        "BLE_Capture.csv",
+        "text/csv"
+    );
+
+}
+
+
+// ------------------------------------------------
+// EXPORT JSON
+// ------------------------------------------------
+
+function exportJSON() {
+
+    let json =
+    JSON.stringify(
+        Object.values(devices),
+        null,
+        2
+    );
+
+
+    downloadFile(
+        json,
+        "BLE_Capture.json",
+        "application/json"
+    );
+
+}
+
+
+// ------------------------------------------------
+// DOWNLOAD FILE
+// ------------------------------------------------
+
+function downloadFile(
+    data,
+    filename,
+    type
+) {
+
+    let blob =
+    new Blob(
+        [data],
+        {type: type}
+    );
+
+
+    let url =
+    URL.createObjectURL(blob);
+
+
+    let link =
+    document.createElement("a");
+
+
+    link.href = url;
+
+    link.download =
+    filename;
+
+
+    document.body.appendChild(
+        link
+    );
+
+
+    link.click();
+
+
+    document.body.removeChild(
+        link
+    );
+
+
+    URL.revokeObjectURL(
+        url
+    );
+
+}
+
+
+// ------------------------------------------------
+// CLEAR
+// ------------------------------------------------
+
+function clearCapture() {
+
+    devices = {};
+
+    packetCount = 0;
+
+
+    document.getElementById(
+        "packetCount"
+    ).innerText = "0";
+
+
+    updateTable();
+
+}
+
+
+// START
+
+connectWebSocket();
+
+</script>
+
+</body>
+
+</html>
+)rawliteral";
+
+
+// --------------------------------------------------
+// ROOT
+// --------------------------------------------------
+
+void handleRoot() {
+
+  server.send(
+    200,
+    "text/html",
+    INDEX_HTML
+  );
+}
+
+
+// --------------------------------------------------
+// SETUP
+// --------------------------------------------------
+
+void setup() {
+
+  Serial.begin(115200);
+
+
+  Serial.println();
+  Serial.println(
+    "================================="
+  );
+
+  Serial.println(
+    "ESP32 BLE MONITOR"
+  );
+
+  Serial.println(
+    "================================="
+  );
+
+
+  // Reset device records
+
+  for (int i = 0; i < MAX_DEVICES; i++) {
+
+    devices[i].used = false;
+  }
+
+
+  // -----------------------------------------------
+  // Wi-Fi AP
+  // -----------------------------------------------
+
+  WiFi.mode(WIFI_AP);
+
+  WiFi.softAP(
+    AP_SSID,
+    AP_PASSWORD
+  );
+
+
+  Serial.print(
+    "Wi-Fi SSID: "
+  );
+
+  Serial.println(
+    AP_SSID
+  );
+
+
+  Serial.print(
+    "Wi-Fi Password: "
+  );
+
+  Serial.println(
+    AP_PASSWORD
+  );
+
+
+  Serial.print(
+    "Dashboard: http://"
+  );
+
+  Serial.println(
+    WiFi.softAPIP()
+  );
+
+
+  // -----------------------------------------------
+  // Web server
+  // -----------------------------------------------
+
+  server.on(
+    "/",
+    HTTP_GET,
+    handleRoot
+  );
+
+  server.begin();
+
+
+  // -----------------------------------------------
+  // WebSocket
+  // -----------------------------------------------
+
+  webSocket.begin();
+
+
+  // -----------------------------------------------
+  // BLE
+  // -----------------------------------------------
+
+  BLEDevice::init("");
+
+
+  pBLEScan =
+    BLEDevice::getScan();
+
+
+  pBLEScan->setAdvertisedDeviceCallbacks(
+    new MyAdvertisedDeviceCallbacks()
+  );
+
+
+  pBLEScan->setActiveScan(true);
+
+  pBLEScan->setInterval(100);
+
+  pBLEScan->setWindow(80);
+
+
+  Serial.println(
+    "BLE scanner started"
+  );
+
+}
+
+
+// --------------------------------------------------
+// LOOP
+// --------------------------------------------------
+
+void loop() {
+
+  server.handleClient();
+
+  webSocket.loop();
+
+
+  // Scan BLE advertisements
+
+  pBLEScan->start(
+    2,
+    false
+  );
+
+  pBLEScan->clearResults();
+
+}
+
+
+
+
+
 PART B
 /*
   ====================================================================
