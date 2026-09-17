@@ -166,10 +166,7 @@ Every Bluetooth device has a **48-bit Bluetooth Device Address (BD_ADDR)**. To i
 | Random Private Resolvable (RPA) | ✘ | ✔ | ✔ (Trusted Devices Only) | High |
 | Random Private Non-Resolvable (NRPA) | ✘ | ✔ | ✘ | Very High |
 
-## wEEK - 2
-Here's a clean, professional **GitHub README** section for these topics.
-
----
+## WEEK - 2
 
 # Advertising Data (AD) Structure
 
